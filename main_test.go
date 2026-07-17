@@ -288,6 +288,30 @@ func TestPageAllowsConfiguredFrameAncestor(t *testing.T) {
 	}
 }
 
+func TestResetUsesCustomConfirmationDialog(t *testing.T) {
+	script, err := webFiles.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(script), "window.confirm") {
+		t.Fatal("reset must not use the browser confirmation dialog")
+	}
+	if !strings.Contains(string(script), "重置次数非常珍贵，务必确认好再重置") ||
+		!strings.Contains(string(script), "confirmResetFinal") {
+		t.Fatal("reset must require the final custom confirmation dialog")
+	}
+
+	page, err := webFiles.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"confirm-modal", "confirm-modal-cancel", "confirm-modal-accept"} {
+		if !strings.Contains(string(page), `id="`+id+`"`) {
+			t.Fatalf("missing custom confirmation element %q", id)
+		}
+	}
+}
+
 func TestNormalizeSub2APIURL(t *testing.T) {
 	testCases := []struct {
 		input string

@@ -89,6 +89,10 @@ body {
     var(--page-bg);
 }
 
+body.modal-open {
+  overflow: hidden;
+}
+
 button {
   font: inherit;
 }
@@ -144,6 +148,14 @@ h1 {
   margin-bottom: 0;
   font-size: clamp(25px, 5vw, 34px);
   letter-spacing: -0.035em;
+}
+
+.page-description {
+  max-width: 660px;
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
 }
 
 h2 {
@@ -396,6 +408,89 @@ h3 {
   background: var(--warning-soft);
 }
 
+.button-secondary {
+  color: var(--muted);
+  background: var(--surface-muted);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+.button-confirm-reset {
+  color: #ffffff;
+  background: #ea580c;
+  box-shadow: 0 8px 20px rgba(234, 88, 12, 0.22);
+}
+
+.modal-backdrop {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(15, 23, 42, 0.5);
+  backdrop-filter: blur(8px);
+}
+
+.confirm-modal {
+  width: min(100%, 420px);
+  padding: 22px;
+  border: 1px solid var(--border-strong);
+  border-radius: 18px;
+  background: var(--surface-solid);
+  box-shadow: 0 28px 80px rgba(15, 23, 42, 0.28);
+  animation: modal-enter 160ms ease-out;
+}
+
+.confirm-modal-heading {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+}
+
+.confirm-modal-icon {
+  display: inline-grid;
+  width: 42px;
+  height: 42px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 13px;
+  color: var(--warning-text);
+  background: var(--warning-soft);
+  font-size: 22px;
+  font-weight: 800;
+}
+
+.confirm-modal-kicker {
+  margin-bottom: 3px;
+  color: var(--warning-text);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+}
+
+.confirm-modal h2 {
+  margin-bottom: 0;
+  font-size: 18px;
+}
+
+.confirm-modal-message {
+  margin: 17px 0 0;
+  padding: 12px 13px;
+  border-radius: 11px;
+  color: var(--muted);
+  background: var(--surface-muted);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-line;
+}
+
+.confirm-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  margin-top: 19px;
+}
+
 .button.is-loading .button-icon,
 .button-refresh.is-loading .button-icon {
   animation: spin 0.8s linear infinite;
@@ -458,6 +553,13 @@ h3 {
   to { transform: rotate(360deg); }
 }
 
+@keyframes modal-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+}
+
 @media (max-width: 720px) {
   .page-shell {
     padding: 12px;
@@ -501,6 +603,11 @@ h3 {
     flex: 1 1 auto;
   }
 
+  .confirm-modal-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
   .window-footer {
     display: block;
   }
@@ -508,5 +615,11 @@ h3 {
   .reset-time {
     display: block;
     margin-top: 5px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .confirm-modal {
+    animation: none;
   }
 }

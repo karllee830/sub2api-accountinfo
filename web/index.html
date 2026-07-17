@@ -15,6 +15,10 @@
           <div>
             <p class="eyebrow">SUB2API ACCOUNTS</p>
             <h1 id="page-title">订阅账号用量</h1>
+            <p class="page-description">
+              当前页查看的是您当前参与拼车的车队共享总账号使用情况。<br />
+              分为5小时和7天的限制用量，可根据当前具体用量情况决定是否运行耗费Token的长任务。
+            </p>
           </div>
           <span id="user-badge" class="user-badge">验证中</span>
         </header>
@@ -38,5 +42,28 @@
         </footer>
       </section>
     </main>
+
+    <div id="confirm-modal" class="modal-backdrop is-hidden">
+      <section
+        class="confirm-modal"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="confirm-modal-title"
+        aria-describedby="confirm-modal-message"
+      >
+        <div class="confirm-modal-heading">
+          <span class="confirm-modal-icon" aria-hidden="true">↻</span>
+          <div>
+            <p class="confirm-modal-kicker">RESET USAGE</p>
+            <h2 id="confirm-modal-title">确认重置账号</h2>
+          </div>
+        </div>
+        <p id="confirm-modal-message" class="confirm-modal-message"></p>
+        <div class="confirm-modal-actions">
+          <button id="confirm-modal-cancel" type="button" class="button button-secondary">取消</button>
+          <button id="confirm-modal-accept" type="button" class="button button-confirm-reset">确认重置</button>
+        </div>
+      </section>
+    </div>
   </body>
 </html>

@@ -7,13 +7,20 @@
     error: document.getElementById('error-panel'),
     loading: document.getElementById('dashboard-loading'),
     content: document.getElementById('dashboard-content'),
-    refreshButton: document.getElementById('refresh-button')
+    refreshButton: document.getElementById('refresh-button'),
+    confirmModal: document.getElementById('confirm-modal'),
+    confirmTitle: document.getElementById('confirm-modal-title'),
+    confirmMessage: document.getElementById('confirm-modal-message'),
+    confirmCancel: document.getElementById('confirm-modal-cancel'),
+    confirmAccept: document.getElementById('confirm-modal-accept')
   }
 
   const state = {
     userID: 0,
     token: '',
-    loading: false
+    loading: false,
+    confirmResolve: null,
+    confirmTrigger: null
   }
 
   const storageKeys = {
@@ -118,6 +125,73 @@
   function clearNotice() {
     elements.notice.textContent = ''
     elements.notice.classList.add('is-hidden')
+  }
+
+  function closeConfirmation(confirmed) {
+    if (!state.confirmResolve) return
+    const resolve = state.confirmResolve
+    const trigger = state.confirmTrigger
+    state.confirmResolve = null
+    state.confirmTrigger = null
+    elements.confirmModal.classList.add('is-hidden')
+    document.body.classList.remove('modal-open')
+    if (trigger?.isConnected) trigger.focus({ preventScroll: true })
+    resolve(confirmed)
+  }
+
+  function showConfirmation(title, message, trigger) {
+    if (state.confirmResolve) return Promise.resolve(false)
+    elements.confirmTitle.textContent = title
+    elements.confirmMessage.textContent = message
+    elements.confirmModal.classList.remove('is-hidden')
+    document.body.classList.add('modal-open')
+    state.confirmTrigger = trigger
+    return new Promise((resolve) => {
+      state.confirmResolve = resolve
+      window.requestAnimationFrame(() => {
+        if (state.confirmResolve) elements.confirmAccept.focus()
+      })
+    })
+  }
+
+  function confirmReset(accountID, count, trigger) {
+    return showConfirmation(
+      `确认重置账号 #${accountID}`,
+      `本次操作将消耗 1 次重置额度，当前可用 ${count} 次。重置后账号用量窗口将重新开始计算。`,
+      trigger
+    )
+  }
+
+  function confirmResetFinal(trigger) {
+    return showConfirmation(
+      '确定重置吗？',
+      '重置次数非常珍贵，务必确认好再重置！\n如不确定可联系管理员！',
+      trigger
+    )
+  }
+
+  function handleConfirmationKeydown(event) {
+    if (elements.confirmModal.classList.contains('is-hidden')) return
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      closeConfirmation(false)
+      return
+    }
+    if (event.key !== 'Tab') return
+    const focusable = [elements.confirmCancel, elements.confirmAccept]
+    const first = focusable[0]
+    const last = focusable[focusable.length - 1]
+    if (!focusable.includes(document.activeElement)) {
+      event.preventDefault()
+      const target = event.shiftKey ? last : first
+      target.focus()
+    } else if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault()
+      last.focus()
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault()
+      first.focus()
+    }
   }
 
   function formatPercent(value) {
@@ -297,7 +371,8 @@
     if (resetButton) {
       resetButton.addEventListener('click', async () => {
         if (availableCount(quota) <= 0) return
-        if (!window.confirm(`确定重置账号 #${account.id} 吗？当前可用 ${availableCount(quota)} 次。`)) return
+        if (!await confirmReset(account.id, availableCount(quota), resetButton)) return
+        if (!await confirmResetFinal(resetButton)) return
         resetButton.disabled = true
         resetButton.classList.add('is-loading')
         clearError()
@@ -428,6 +503,13 @@
       setPageLoading(false)
     }
   }
+
+  elements.confirmCancel.addEventListener('click', () => closeConfirmation(false))
+  elements.confirmAccept.addEventListener('click', () => closeConfirmation(true))
+  elements.confirmModal.addEventListener('click', (event) => {
+    if (event.target === elements.confirmModal) closeConfirmation(false)
+  })
+  document.addEventListener('keydown', handleConfirmationKeydown)
 
   if (!initializeCredentials()) {
     elements.loading.classList.add('is-hidden')
