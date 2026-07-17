@@ -79,7 +79,7 @@ go build ./...
 
 ## 自动发布镜像
 
-工作流 `.github/workflows/publish-ghcr.yml` 会自动构建 `linux/amd64` 和 `linux/arm64` 镜像：
+工作流 `.github/workflows/publish-ghcr.yml` 会并行构建 `linux/amd64` 和 `linux/arm64` 镜像。AMD64 使用标准 runner，ARM64 使用原生 `ubuntu-24.04-arm` runner；两个 Job 分别推送 digest，完成后再合并为同一个多架构 manifest：
 
 - 推送到 `main`：发布 `latest`、`main` 和 `sha-*` 标签；
 - 推送 `v1.2.3` 格式的 Git 标签：发布 `1.2.3`、`1.2`、`1` 和 `sha-*` 标签；
