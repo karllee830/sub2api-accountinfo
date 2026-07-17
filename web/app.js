@@ -2,26 +2,23 @@
   'use strict'
 
   const elements = {
-    accountBadge: document.getElementById('account-badge'),
+    userBadge: document.getElementById('user-badge'),
     notice: document.getElementById('notice'),
-    loading: document.getElementById('usage-loading'),
-    content: document.getElementById('usage-content'),
-    meta: document.getElementById('usage-meta'),
-    windows: document.getElementById('usage-windows'),
     error: document.getElementById('error-panel'),
-    queryButton: document.getElementById('query-button'),
-    countButton: document.getElementById('count-button'),
-    countLabel: document.getElementById('count-label'),
-    resetButton: document.getElementById('reset-button'),
-    creditInfo: document.getElementById('credit-info'),
-    resetPolicy: document.getElementById('reset-policy')
+    loading: document.getElementById('dashboard-loading'),
+    content: document.getElementById('dashboard-content'),
+    refreshButton: document.getElementById('refresh-button')
   }
 
   const state = {
-    basePath: window.location.pathname.replace(/\/+$/, ''),
-    allowReset: false,
-    quota: null,
-    busy: new Set()
+    userID: 0,
+    token: '',
+    loading: false
+  }
+
+  const storageKeys = {
+    userID: 'sub2api-accountinfo:user-id',
+    token: 'sub2api-accountinfo:token'
   }
 
   const windowDefinitions = [
@@ -31,11 +28,56 @@
     ['seven_day_fable', '7d F']
   ]
 
-  async function request(action, options = {}) {
-    const response = await fetch(`${state.basePath}/api/${action}`, {
+  const accountTypeLabels = {
+    oauth: 'OAuth',
+    'setup-token': 'Setup Token',
+    apikey: 'API Key',
+    upstream: '上游转发',
+    bedrock: 'AWS Bedrock',
+    service_account: 'Service Account'
+  }
+
+  function initializeCredentials() {
+    const url = new URL(window.location.href)
+    const queryToken = url.searchParams.get('token') || ''
+    const queryUserID = Number(url.searchParams.get('user_id')) || 0
+    const theme = url.searchParams.get('theme')
+    const lang = url.searchParams.get('lang')
+
+    if (theme === 'light' || theme === 'dark') {
+      document.documentElement.dataset.theme = theme
+    }
+    if (lang) document.documentElement.lang = lang
+
+    try {
+      if (queryToken) sessionStorage.setItem(storageKeys.token, queryToken)
+      if (queryUserID > 0) sessionStorage.setItem(storageKeys.userID, String(queryUserID))
+      state.token = queryToken || sessionStorage.getItem(storageKeys.token) || ''
+      state.userID = queryUserID || Number(sessionStorage.getItem(storageKeys.userID)) || 0
+    } catch {
+      state.token = queryToken
+      state.userID = queryUserID
+    }
+
+    if (queryToken) {
+      url.searchParams.delete('token')
+      window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`)
+    }
+
+    return state.userID > 0 && state.token !== ''
+  }
+
+  async function request(path, options = {}) {
+    const response = await fetch(`/api/${path}`, {
       cache: 'no-store',
       credentials: 'same-origin',
-      ...options
+      ...options,
+      headers: {
+        Authorization: `Bearer ${state.token}`,
+        'X-Sub2API-User-ID': String(state.userID),
+        'Accept-Language': document.documentElement.lang || 'zh-CN',
+        ...(options.headers || {})
+      }
     })
     let payload
     try {
@@ -43,25 +85,19 @@
     } catch {
       throw new Error(`服务返回了无法解析的响应（HTTP ${response.status}）`)
     }
-    if (!response.ok || (payload && typeof payload === 'object' && payload.code !== undefined && payload.code !== 0)) {
-      throw new Error(payload?.message || payload?.reason || `请求失败（HTTP ${response.status}）`)
+    if (!response.ok || payload?.code !== 0) {
+      throw new Error(payload?.message || `请求失败（HTTP ${response.status}）`)
     }
-    if (payload && typeof payload === 'object' && payload.code === 0 && 'data' in payload) {
-      return payload.data
-    }
-    return payload
+    return payload.data
   }
 
-  function setBusy(name, active) {
-    if (active) state.busy.add(name)
-    else state.busy.delete(name)
-    const anyBusy = state.busy.size > 0
-    elements.queryButton.disabled = anyBusy
-    elements.countButton.disabled = anyBusy
-    elements.queryButton.classList.toggle('is-loading', state.busy.has('usage'))
-    elements.countButton.classList.toggle('is-loading', state.busy.has('quota'))
-    elements.resetButton.classList.toggle('is-loading', state.busy.has('reset'))
-    updateResetButton()
+  function setPageLoading(active) {
+    state.loading = active
+    elements.refreshButton.disabled = active
+    elements.refreshButton.classList.toggle('is-loading', active)
+    if (active && elements.content.childElementCount === 0) {
+      elements.loading.classList.remove('is-hidden')
+    }
   }
 
   function showError(error) {
@@ -131,9 +167,9 @@
     return `${restMinutes}分钟`
   }
 
-  function makeChip(text) {
+  function createChip(text, className = 'stat-chip') {
     const chip = document.createElement('span')
-    chip.className = 'stat-chip'
+    chip.className = className
     chip.textContent = text
     return chip
   }
@@ -157,10 +193,11 @@
     track.setAttribute('role', 'progressbar')
     track.setAttribute('aria-valuemin', '0')
     track.setAttribute('aria-valuemax', '100')
-    track.setAttribute('aria-valuenow', String(Math.max(0, Math.min(100, Number(usage.utilization) || 0))))
+    const utilization = Math.max(0, Math.min(100, Number(usage.utilization) || 0))
+    track.setAttribute('aria-valuenow', String(utilization))
     const bar = document.createElement('div')
     bar.className = 'progress-bar'
-    bar.style.width = `${Math.max(0, Math.min(100, Number(usage.utilization) || 0))}%`
+    bar.style.width = `${utilization}%`
     track.append(bar)
 
     const footer = document.createElement('div')
@@ -170,15 +207,13 @@
     const windowStats = usage.window_stats
     if (windowStats) {
       stats.append(
-        makeChip(`${formatCompact(windowStats.requests)} req`),
-        makeChip(`${formatCompact(windowStats.tokens)} tok`),
-        makeChip(`A $${formatMoney(windowStats.cost)}`)
+        createChip(`${formatCompact(windowStats.requests)} req`),
+        createChip(`${formatCompact(windowStats.tokens)} tok`),
+        createChip(`A $${formatMoney(windowStats.cost)}`)
       )
       if (windowStats.user_cost !== undefined && windowStats.user_cost !== null) {
-        stats.append(makeChip(`U $${formatMoney(windowStats.user_cost)}`))
+        stats.append(createChip(`U $${formatMoney(windowStats.user_cost)}`))
       }
-    } else if (usage.limit_requests) {
-      stats.append(makeChip(`${formatCompact(usage.used_requests)} / ${formatCompact(usage.limit_requests)} req`))
     }
     const reset = document.createElement('span')
     reset.className = 'reset-time'
@@ -190,138 +225,216 @@
     return wrapper
   }
 
-  function renderUsage(data) {
-    elements.loading.classList.add('is-hidden')
-    elements.content.classList.remove('is-hidden')
-    elements.meta.replaceChildren()
-    elements.windows.replaceChildren()
+  function availableCount(quota) {
+    return Number(quota?.rate_limit_reset_credits?.available_count) || 0
+  }
 
-    const source = document.createElement('span')
-    source.className = 'meta-chip'
-    source.textContent = data?.source === 'active' ? '主动查询' : '被动采样'
-    elements.meta.append(source)
-    if (data?.updated_at) {
-      const updated = document.createElement('span')
-      updated.className = 'meta-chip'
-      updated.textContent = `更新于 ${formatDate(data.updated_at)}`
-      elements.meta.append(updated)
+  function renderAccountActions(container, account, allowReset) {
+    if (account.platform !== 'openai') return
+
+    const actionRow = document.createElement('div')
+    actionRow.className = 'account-actions'
+    const countButton = document.createElement('button')
+    countButton.type = 'button'
+    countButton.className = 'button button-count'
+    countButton.textContent = '剩余重置次数'
+    actionRow.append(countButton)
+
+    let resetButton = null
+    if (allowReset) {
+      resetButton = document.createElement('button')
+      resetButton.type = 'button'
+      resetButton.className = 'button button-reset'
+      resetButton.textContent = '重置'
+      resetButton.disabled = true
+      actionRow.append(resetButton)
     }
 
+    const creditInfo = document.createElement('div')
+    creditInfo.className = 'credit-info is-hidden'
+    let quota = null
+
+    function updateResetButton() {
+      if (!resetButton) return
+      resetButton.disabled = quota === null || availableCount(quota) <= 0
+      resetButton.title = quota === null
+        ? '请先查询剩余重置次数'
+        : availableCount(quota) > 0
+          ? '消耗一次额度并重置用量窗口'
+          : '当前没有可用重置次数'
+    }
+
+    async function loadQuota() {
+      countButton.disabled = true
+      countButton.classList.add('is-loading')
+      clearError()
+      try {
+        quota = await request(`accounts/${account.id}/quota`)
+        countButton.textContent = `剩余重置次数 ${availableCount(quota)}`
+        const credits = quota?.rate_limit_reset_credits?.credits || []
+        const expirations = credits
+          .map((credit) => credit?.expires_at)
+          .filter(Boolean)
+          .sort((left, right) => new Date(left).getTime() - new Date(right).getTime())
+        if (expirations.length > 0) {
+          const rest = expirations.length > 1 ? `，另有 ${expirations.length - 1} 次` : ''
+          creditInfo.textContent = `最早到期：${formatDate(expirations[0])}${rest}`
+          creditInfo.classList.remove('is-hidden')
+        } else {
+          creditInfo.textContent = ''
+          creditInfo.classList.add('is-hidden')
+        }
+        updateResetButton()
+      } catch (error) {
+        showError(error)
+      } finally {
+        countButton.disabled = false
+        countButton.classList.remove('is-loading')
+      }
+    }
+
+    countButton.addEventListener('click', loadQuota)
+    if (resetButton) {
+      resetButton.addEventListener('click', async () => {
+        if (availableCount(quota) <= 0) return
+        if (!window.confirm(`确定重置账号 #${account.id} 吗？当前可用 ${availableCount(quota)} 次。`)) return
+        resetButton.disabled = true
+        resetButton.classList.add('is-loading')
+        clearError()
+        clearNotice()
+        try {
+          const result = await request(`accounts/${account.id}/reset`, { method: 'POST' })
+          showNotice(`账号 #${account.id} 重置成功，已重置 ${Number(result?.windows_reset) || 0} 个用量窗口。`)
+          await loadDashboard(true)
+        } catch (error) {
+          showError(error)
+        } finally {
+          resetButton.classList.remove('is-loading')
+          updateResetButton()
+        }
+      })
+    }
+
+    container.append(actionRow, creditInfo)
+  }
+
+  function renderAccount(account, allowReset) {
+    const card = document.createElement('article')
+    card.className = 'account-card'
+
+    const header = document.createElement('header')
+    header.className = 'account-header'
+    const identity = document.createElement('div')
+    const name = document.createElement('h3')
+    name.textContent = account.name || `账号 #${account.id}`
+    const number = document.createElement('p')
+    number.className = 'account-number'
+    number.textContent = `账号 #${account.id}`
+    identity.append(name, number)
+    const badges = document.createElement('div')
+    badges.className = 'account-badges'
+    badges.append(
+      createChip(account.platform || 'unknown', 'type-badge'),
+      createChip(accountTypeLabels[account.type] || account.type || '未知类型', 'type-badge type-badge-accent')
+    )
+    if (account.status !== 'active') badges.append(createChip(account.status, 'type-badge type-badge-warning'))
+    if (!account.schedulable) badges.append(createChip('不可调度', 'type-badge type-badge-warning'))
+    header.append(identity, badges)
+
+    const meta = document.createElement('div')
+    meta.className = 'usage-meta'
+    if (account.usage?.updated_at) meta.append(createChip(`更新于 ${formatDate(account.usage.updated_at)}`, 'meta-chip'))
+
+    const windows = document.createElement('div')
+    windows.className = 'usage-windows'
     let rendered = 0
     for (const [key, label] of windowDefinitions) {
-      if (!data?.[key]) continue
-      elements.windows.append(renderWindow(label, data[key]))
+      if (!account.usage?.[key]) continue
+      windows.append(renderWindow(label, account.usage[key]))
       rendered += 1
     }
     if (rendered === 0) {
       const empty = document.createElement('div')
       empty.className = 'empty-state'
-      empty.textContent = data?.error || '当前账号暂无可显示的用量窗口'
-      elements.windows.append(empty)
+      empty.textContent = account.usage_error || account.usage?.error || '当前账号暂无可显示的用量窗口'
+      windows.append(empty)
     }
+
+    card.append(header, meta, windows)
+    renderAccountActions(card, account, allowReset)
+    return card
   }
 
-  function availableCount() {
-    return Number(state.quota?.rate_limit_reset_credits?.available_count) || 0
-  }
+  function renderDashboard(data) {
+    elements.userBadge.textContent = `用户 #${data.user_id}`
+    elements.content.replaceChildren()
 
-  function updateResetButton() {
-    elements.resetButton.classList.toggle('is-hidden', !state.allowReset)
-    const canReset = state.allowReset && state.quota !== null && availableCount() > 0 && state.busy.size === 0
-    elements.resetButton.disabled = !canReset
-    if (!state.allowReset) elements.resetButton.title = ''
-    else if (state.quota === null) elements.resetButton.title = '请先点击“剩余重置次数”查询可用次数'
-    else if (availableCount() <= 0) elements.resetButton.title = '当前没有可用重置次数'
-    else elements.resetButton.title = '消耗一次额度并重置用量窗口'
-  }
-
-  function renderQuota(data) {
-    state.quota = data
-    elements.countLabel.textContent = `剩余重置次数 ${availableCount()}`
-    const credits = data?.rate_limit_reset_credits?.credits || []
-    const expirations = credits
-      .map((credit) => credit?.expires_at)
-      .filter(Boolean)
-      .sort((left, right) => new Date(left).getTime() - new Date(right).getTime())
-    if (expirations.length > 0) {
-      const rest = expirations.length > 1 ? `，另有 ${expirations.length - 1} 次` : ''
-      elements.creditInfo.textContent = `最早到期：${formatDate(expirations[0])}${rest}`
-      elements.creditInfo.classList.remove('is-hidden')
+    if (!Array.isArray(data.groups) || data.groups.length === 0) {
+      const empty = document.createElement('div')
+      empty.className = 'empty-state empty-dashboard'
+      empty.textContent = '当前用户没有有效订阅'
+      elements.content.append(empty)
     } else {
-      elements.creditInfo.textContent = ''
-      elements.creditInfo.classList.add('is-hidden')
-    }
-    updateResetButton()
-  }
+      for (const group of data.groups) {
+        const section = document.createElement('section')
+        section.className = 'group-section'
+        const header = document.createElement('header')
+        header.className = 'group-header'
+        const title = document.createElement('div')
+        const name = document.createElement('h2')
+        name.textContent = group.name || `分组 #${group.id}`
+        const detail = document.createElement('p')
+        detail.textContent = `分组 #${group.id}${group.expires_at ? ` · 订阅到期 ${formatDate(group.expires_at)}` : ''}`
+        title.append(name, detail)
+        const groupBadges = document.createElement('div')
+        groupBadges.className = 'account-badges'
+        groupBadges.append(
+          createChip(group.platform || 'unknown', 'type-badge'),
+          createChip(`${group.accounts?.length || 0} 个账号`, 'type-badge type-badge-accent')
+        )
+        header.append(title, groupBadges)
 
-  async function loadUsage(active) {
-    clearError()
-    clearNotice()
-    setBusy('usage', true)
-    try {
-      const suffix = active ? 'usage?active=1' : 'usage'
-      renderUsage(await request(suffix))
-    } catch (error) {
-      elements.loading.classList.add('is-hidden')
-      showError(error)
-    } finally {
-      setBusy('usage', false)
-    }
-  }
-
-  async function loadQuota() {
-    clearError()
-    clearNotice()
-    setBusy('quota', true)
-    try {
-      renderQuota(await request('quota'))
-    } catch (error) {
-      showError(error)
-    } finally {
-      setBusy('quota', false)
-    }
-  }
-
-  async function resetQuota() {
-    if (!state.allowReset || availableCount() <= 0) return
-    if (!window.confirm(`确定消耗一次重置额度吗？当前可用 ${availableCount()} 次。`)) return
-    clearError()
-    clearNotice()
-    setBusy('reset', true)
-    try {
-      const result = await request('reset', { method: 'POST' })
-      await Promise.all([loadQuota(), loadUsage(true)])
-      showNotice(`重置成功，已重置 ${Number(result?.windows_reset) || 0} 个用量窗口。`)
-    } catch (error) {
-      showError(error)
-    } finally {
-      setBusy('reset', false)
-    }
-  }
-
-  async function initialize() {
-    try {
-      const publicConfig = await request('config')
-      state.allowReset = Boolean(publicConfig.allow_reset)
-      elements.accountBadge.textContent = `账号 #${publicConfig.account_id}`
-      document.title = `账号 #${publicConfig.account_id} 用量`
-      if (state.allowReset) {
-        elements.resetPolicy.textContent = '重置功能已由服务端开启；查询到可用次数后即可操作。'
-        elements.resetPolicy.classList.remove('is-hidden')
-      } else {
-        elements.resetPolicy.textContent = ''
-        elements.resetPolicy.classList.add('is-hidden')
+        const accounts = document.createElement('div')
+        accounts.className = 'account-list'
+        if (!Array.isArray(group.accounts) || group.accounts.length === 0) {
+          const empty = document.createElement('div')
+          empty.className = 'empty-state'
+          empty.textContent = '该订阅分组尚未绑定账号'
+          accounts.append(empty)
+        } else {
+          for (const account of group.accounts) accounts.append(renderAccount(account, Boolean(data.allow_reset)))
+        }
+        section.append(header, accounts)
+        elements.content.append(section)
       }
-      updateResetButton()
-      await loadUsage(false)
+    }
+
+    elements.loading.classList.add('is-hidden')
+    elements.content.classList.remove('is-hidden')
+  }
+
+  async function loadDashboard(active) {
+    if (state.loading) return
+    setPageLoading(true)
+    clearError()
+    if (active) clearNotice()
+    try {
+      const suffix = active ? 'dashboard?active=1' : 'dashboard'
+      renderDashboard(await request(suffix))
     } catch (error) {
       elements.loading.classList.add('is-hidden')
       showError(error)
+    } finally {
+      setPageLoading(false)
     }
   }
 
-  elements.queryButton.addEventListener('click', () => loadUsage(true))
-  elements.countButton.addEventListener('click', loadQuota)
-  elements.resetButton.addEventListener('click', resetQuota)
-  initialize()
+  if (!initializeCredentials()) {
+    elements.loading.classList.add('is-hidden')
+    elements.refreshButton.disabled = true
+    showError(new Error('链接缺少有效的 user_id 或 token，请从 Sub2API 内重新打开此页面'))
+  } else {
+    elements.refreshButton.addEventListener('click', () => loadDashboard(true))
+    loadDashboard(false)
+  }
 })()

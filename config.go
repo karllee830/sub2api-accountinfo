@@ -16,26 +16,16 @@ const (
 )
 
 type config struct {
-	accessToken    string
-	accountIDs     map[int64]struct{}
-	sub2APIURL     *url.URL
-	adminAPIKey    string
-	allowReset     bool
-	listenAddr     string
-	requestTimeout time.Duration
+	sub2APIURL        *url.URL
+	adminAPIKey       string
+	allowReset        bool
+	trustProxyHeaders bool
+	frameAncestors    string
+	listenAddr        string
+	requestTimeout    time.Duration
 }
 
 func loadConfig() (config, error) {
-	accessToken := strings.TrimSpace(os.Getenv("ACCESS_TOKEN"))
-	if accessToken == "" {
-		return config{}, errors.New("ACCESS_TOKEN is required")
-	}
-
-	accountIDs, err := parseAccountIDs(os.Getenv("ACCOUNT_IDS"))
-	if err != nil {
-		return config{}, err
-	}
-
 	sub2APIURL, err := normalizeSub2APIURL(os.Getenv("SUB2API_URL"))
 	if err != nil {
 		return config{}, err
@@ -50,6 +40,14 @@ func loadConfig() (config, error) {
 	if err != nil {
 		return config{}, err
 	}
+	trustProxyHeaders, err := parseBoolEnv("TRUST_PROXY_HEADERS", true)
+	if err != nil {
+		return config{}, err
+	}
+	frameAncestors, err := normalizeFrameAncestors(os.Getenv("FRAME_ANCESTORS"), sub2APIURL)
+	if err != nil {
+		return config{}, err
+	}
 
 	listenAddr := strings.TrimSpace(os.Getenv("LISTEN_ADDR"))
 	if listenAddr == "" {
@@ -57,34 +55,14 @@ func loadConfig() (config, error) {
 	}
 
 	return config{
-		accessToken:    accessToken,
-		accountIDs:     accountIDs,
-		sub2APIURL:     sub2APIURL,
-		adminAPIKey:    adminAPIKey,
-		allowReset:     allowReset,
-		listenAddr:     listenAddr,
-		requestTimeout: 30 * time.Second,
+		sub2APIURL:        sub2APIURL,
+		adminAPIKey:       adminAPIKey,
+		allowReset:        allowReset,
+		trustProxyHeaders: trustProxyHeaders,
+		frameAncestors:    frameAncestors,
+		listenAddr:        listenAddr,
+		requestTimeout:    30 * time.Second,
 	}, nil
-}
-
-func parseAccountIDs(raw string) (map[int64]struct{}, error) {
-	values := strings.Split(raw, ",")
-	result := make(map[int64]struct{}, len(values))
-	for _, value := range values {
-		trimmed := strings.TrimSpace(value)
-		if trimmed == "" {
-			continue
-		}
-		accountID, err := strconv.ParseInt(trimmed, 10, 64)
-		if err != nil || accountID <= 0 {
-			return nil, fmt.Errorf("ACCOUNT_IDS contains invalid account ID %q", trimmed)
-		}
-		result[accountID] = struct{}{}
-	}
-	if len(result) == 0 {
-		return nil, errors.New("ACCOUNT_IDS must contain at least one positive account ID")
-	}
-	return result, nil
 }
 
 func normalizeSub2APIURL(raw string) (*url.URL, error) {
@@ -110,6 +88,17 @@ func normalizeSub2APIURL(raw string) (*url.URL, error) {
 		parsed.Path += "/api/v1"
 	}
 	return parsed, nil
+}
+
+func normalizeFrameAncestors(raw string, sub2APIURL *url.URL) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		value = sub2APIURL.Scheme + "://" + sub2APIURL.Host
+	}
+	if strings.ContainsAny(value, ";\r\n") {
+		return "", errors.New("FRAME_ANCESTORS must be a CSP source list without semicolons")
+	}
+	return value, nil
 }
 
 func parseBoolEnv(name string, fallback bool) (bool, error) {

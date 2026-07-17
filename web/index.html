@@ -4,55 +4,38 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
-    <title>账号用量</title>
+    <title>订阅账号用量</title>
     <link rel="stylesheet" href="/assets/app.css" />
     <script src="/assets/app.js" defer></script>
   </head>
   <body>
     <main class="page-shell">
-      <section class="usage-card" aria-labelledby="page-title">
-        <header class="card-header">
+      <section class="dashboard-card" aria-labelledby="page-title">
+        <header class="page-header">
           <div>
-            <p class="eyebrow">SUB2API ACCOUNT</p>
-            <h1 id="page-title">账号用量</h1>
+            <p class="eyebrow">SUB2API ACCOUNTS</p>
+            <h1 id="page-title">订阅账号用量</h1>
           </div>
-          <span id="account-badge" class="account-badge">加载中</span>
+          <span id="user-badge" class="user-badge">验证中</span>
         </header>
 
         <div id="notice" class="notice is-hidden" role="status"></div>
-
-        <div id="usage-loading" class="loading-block">
-          <div class="skeleton skeleton-label"></div>
-          <div class="skeleton skeleton-bar"></div>
-          <div class="skeleton skeleton-meta"></div>
-          <div class="skeleton skeleton-label"></div>
-          <div class="skeleton skeleton-bar"></div>
-        </div>
-
-        <div id="usage-content" class="usage-content is-hidden">
-          <div id="usage-meta" class="usage-meta"></div>
-          <div id="usage-windows" class="usage-windows"></div>
-        </div>
-
         <div id="error-panel" class="error-panel is-hidden" role="alert"></div>
 
-        <footer class="actions">
-          <button id="query-button" type="button" class="button button-query">
+        <div id="dashboard-loading" class="loading-block">
+          <div class="skeleton skeleton-title"></div>
+          <div class="skeleton skeleton-card"></div>
+          <div class="skeleton skeleton-card"></div>
+        </div>
+
+        <div id="dashboard-content" class="groups is-hidden"></div>
+
+        <footer class="page-actions">
+          <button id="refresh-button" type="button" class="button button-refresh">
             <span class="button-icon" aria-hidden="true">↻</span>
-            <span>刷新</span>
-          </button>
-          <button id="count-button" type="button" class="button button-count">
-            <span class="button-icon" aria-hidden="true">#</span>
-            <span id="count-label">剩余重置次数</span>
-          </button>
-          <button id="reset-button" type="button" class="button button-reset is-hidden" disabled>
-            <span class="button-icon" aria-hidden="true">↺</span>
-            <span>重置</span>
+            <span>刷新全部用量</span>
           </button>
         </footer>
-
-        <div id="credit-info" class="credit-info is-hidden"></div>
-        <p id="reset-policy" class="reset-policy is-hidden"></p>
       </section>
     </main>
   </body>

@@ -1,12 +1,15 @@
 # sub2api-accountinfo
 
-一个只展示指定 Sub2API OpenAI OAuth 账号用量窗口的小型只读入口。页面行为参考 Sub2API 的 `/admin/accounts`：
+嵌入 Sub2API 自定义菜单的订阅账号用量页面。Sub2API 打开 iframe 时传入 `user_id` 和用户 JWT Token，本项目会：
 
-- 自动显示 5h、7d 等用量窗口；
-- “查询”按钮强制主动刷新用量；
-- “次数”按钮查询可用的 rate-limit reset credits；
-- “重置”按钮是否可操作由 Docker 环境变量控制；
-- Sub2API 管理凭证只在服务端使用，不会下发到浏览器。
+1. 使用 Token 调用 Sub2API `/auth/me` 实时验证用户身份；
+2. 校验 Token 中的实际用户 ID 与传入的 `user_id` 一致；
+3. 使用仅保存在服务端的 Admin API Key 查询用户的有效订阅；
+4. 查询每个订阅分组绑定的全部账号；
+5. 展示账号平台、账号类型和 5h、7d 等用量窗口；
+6. 对 OpenAI 账号提供剩余重置次数查询，并由环境变量控制是否显示重置按钮。
+
+浏览器不会收到 Admin API Key。`src_host` 和 `src_url` 只作为 Sub2API 提供的来源信息存在，本项目不会使用它们选择上游地址，避免将管理凭证发送到非预期站点。
 
 ## 配置
 
@@ -18,15 +21,37 @@ cp .env.example .env
 
 | 环境变量 | 必填 | 说明 |
 | --- | --- | --- |
-| `ACCESS_TOKEN` | 是 | 当前项目的访问口令，放在访问 URL 中；建议使用长随机字符串 |
-| `ACCOUNT_IDS` | 是 | 可访问的账号 ID 白名单，多个 ID 用英文逗号分隔 |
 | `SUB2API_URL` | 是 | Sub2API 根地址，程序会自动补 `/api/v1`；也可直接填写 API 地址 |
-| `SUB2API_ADMIN_API_KEY` | 是 | Sub2API 后台生成的 Admin API Key，用于 `x-api-key` 鉴权 |
-| `ALLOW_RESET` | 否 | `true` 允许重置，默认 `false`；服务端也会强制校验，不能只靠前端绕过 |
+| `SUB2API_ADMIN_API_KEY` | 是 | Sub2API 后台生成的 Admin API Key，用于服务端 `x-api-key` 鉴权 |
+| `ALLOW_RESET` | 否 | `true` 允许重置，默认 `false`；关闭时前端不显示重置按钮，服务端也会拒绝请求 |
+| `TRUST_PROXY_HEADERS` | 否 | 是否信任反代传入的客户端 IP，默认 `true`；用于保持 Sub2API Token 的 IP/UA 会话绑定 |
+| `FRAME_ANCESTORS` | 否 | CSP `frame-ancestors` 来源列表；默认使用 `SUB2API_URL` 的 origin |
 | `LISTEN_ADDR` | 否 | 容器内监听地址，默认 `:8080` |
 | `HOST_PORT` | 否 | Docker Compose 映射到宿主机的端口，默认 `8080` |
 
-`SUB2API_ADMIN_API_KEY` 可在 Sub2API 管理后台的“设置 → 安全 → Admin API Key”中生成。完整 Key 只在生成时显示一次；本项目仅通过服务端请求头 `x-api-key` 使用它，不会发送给浏览器。
+`SUB2API_ADMIN_API_KEY` 可在 Sub2API 管理后台的“设置 → 安全 → Admin API Key”中生成。完整 Key 只在生成时显示一次。
+
+旧版的 `ACCESS_TOKEN` 和 `ACCOUNT_IDS` 已删除，不再需要配置。账号访问范围完全根据已验证用户的有效订阅分组实时计算。
+
+## Sub2API 嵌入
+
+在 Sub2API 自定义菜单中把 URL 配置为本项目地址。Sub2API 会生成类似链接：
+
+```text
+https://accountinfo.example.com/?user_id=2&token=USER_JWT&theme=light&lang=zh&ui_mode=embedded&src_host=...
+```
+
+前端读取 Token 后会立即从地址栏移除 `token`，并仅保存在当前标签页的 `sessionStorage` 中。后续请求通过 `Authorization: Bearer ...` 发送。
+
+Token 默认带有 Sub2API 会话 IP/UA 绑定，因此反向代理必须传递原始客户端信息：
+
+```nginx
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+proxy_set_header User-Agent $http_user_agent;
+```
+
+当 `TRUST_PROXY_HEADERS=true` 时，不要把容器端口直接暴露到不可信网络；应只允许可信反代访问。
 
 ## Docker 运行
 
@@ -43,39 +68,32 @@ docker compose up -d
 docker compose up -d --build
 ```
 
-访问格式：
-
-```text
-http://服务器地址:8080/{ACCESS_TOKEN}/{ACCOUNT_ID}
-```
-
-例如：
-
-```text
-http://127.0.0.1:8080/replace-with-a-long-random-token/1
-```
-
-只有 `ACCOUNT_IDS` 中的 ID 可以访问。错误的口令和未授权账号统一返回 `404`，不会暴露白名单信息。
+健康检查地址为 `GET /healthz`，不需要用户 Token。
 
 ## 对接的 Sub2API 接口
 
-服务端仅代理以下固定接口，不是通用代理：
+用户身份验证：
 
+- `GET /api/v1/auth/me`
+
+服务端通过 Admin API Key 调用：
+
+- `GET /api/v1/admin/users/:id/subscriptions`
+- `GET /api/v1/admin/accounts?group=:group_id`
 - `GET /api/v1/admin/accounts/:id/usage`
 - `GET /api/v1/admin/accounts/:id/usage?source=active&force=true`
 - `GET /api/v1/admin/openai/accounts/:id/quota`
 - `POST /api/v1/admin/openai/accounts/:id/reset-quota`（仅 `ALLOW_RESET=true`）
 
-当前“次数/重置”能力对应 Sub2API 的 OpenAI OAuth 账号。其他平台即使能返回部分用量数据，也不保证支持这两个操作。
+次数和重置接口仅用于 OpenAI 账号。每次次数或重置请求都会重新验证用户 Token，并重新确认目标账号仍属于该用户的有效订阅分组，防止通过修改账号 ID 越权访问。
 
 ## 本地验证
 
 ```bash
 go test ./...
 go build ./...
+node --check web/app.js
 ```
-
-健康检查地址为 `GET /healthz`，不需要访问口令。
 
 ## 自动发布镜像
 

@@ -1,14 +1,10 @@
 package main
 
 import (
-	"context"
-	"crypto/subtle"
 	"embed"
-	"fmt"
-	"io"
-	"log"
+	"encoding/json"
+	"errors"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 )
@@ -38,7 +34,9 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("/healthz", a.handleHealth)
 	mux.HandleFunc("/assets/app.css", a.handleAsset("web/app.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("/assets/app.js", a.handleAsset("web/app.js", "text/javascript; charset=utf-8"))
-	mux.HandleFunc("/", a.handleProtected)
+	mux.HandleFunc("/api/dashboard", a.handleDashboard)
+	mux.HandleFunc("/api/accounts/", a.handleAccountAPI)
+	mux.HandleFunc("/", a.handlePage)
 	return mux
 }
 
@@ -47,9 +45,7 @@ func (a *app) handleHealth(response http.ResponseWriter, request *http.Request) 
 		methodNotAllowed(response, http.MethodGet)
 		return
 	}
-	response.Header().Set("Content-Type", "application/json; charset=utf-8")
-	response.WriteHeader(http.StatusOK)
-	_, _ = response.Write([]byte(`{"status":"ok"}`))
+	writeJSON(response, http.StatusOK, apiResponse{Code: 0, Message: "success", Data: map[string]string{"status": "ok"}})
 }
 
 func (a *app) handleAsset(name, contentType string) http.HandlerFunc {
@@ -63,75 +59,18 @@ func (a *app) handleAsset(name, contentType string) http.HandlerFunc {
 			return
 		}
 		response.Header().Set("Content-Type", contentType)
-		response.Header().Set("Cache-Control", "public, max-age=3600")
+		response.Header().Set("Cache-Control", "no-cache")
 		response.Header().Set("X-Content-Type-Options", "nosniff")
 		_, _ = response.Write(content)
 	}
 }
 
-func (a *app) handleProtected(response http.ResponseWriter, request *http.Request) {
-	setSecurityHeaders(response)
-
-	segments, err := escapedPathSegments(request.URL.EscapedPath())
-	if err != nil || (len(segments) != 2 && len(segments) != 4) {
-		http.NotFound(response, request)
-		return
-	}
-	if subtle.ConstantTimeCompare([]byte(segments[0]), []byte(a.config.accessToken)) != 1 {
-		http.NotFound(response, request)
-		return
-	}
-
-	accountID, err := strconv.ParseInt(segments[1], 10, 64)
-	if err != nil || accountID <= 0 {
-		http.NotFound(response, request)
-		return
-	}
-	if _, allowed := a.config.accountIDs[accountID]; !allowed {
-		http.NotFound(response, request)
-		return
-	}
-
-	if len(segments) == 2 {
-		a.handlePage(response, request)
-		return
-	}
-	if segments[2] != "api" {
-		http.NotFound(response, request)
-		return
-	}
-
-	switch segments[3] {
-	case "config":
-		a.handlePublicConfig(response, request, accountID)
-	case "usage":
-		a.handleUsage(response, request, accountID)
-	case "quota":
-		a.handleQuota(response, request, accountID)
-	case "reset":
-		a.handleReset(response, request, accountID)
-	default:
-		http.NotFound(response, request)
-	}
-}
-
-func escapedPathSegments(escapedPath string) ([]string, error) {
-	parts := strings.Split(strings.Trim(escapedPath, "/"), "/")
-	segments := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if part == "" {
-			continue
-		}
-		decoded, err := url.PathUnescape(part)
-		if err != nil {
-			return nil, err
-		}
-		segments = append(segments, decoded)
-	}
-	return segments, nil
-}
-
 func (a *app) handlePage(response http.ResponseWriter, request *http.Request) {
+	a.setSecurityHeaders(response)
+	if request.URL.Path != "/" {
+		http.NotFound(response, request)
+		return
+	}
 	if request.Method != http.MethodGet {
 		methodNotAllowed(response, http.MethodGet)
 		return
@@ -142,116 +81,135 @@ func (a *app) handlePage(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	response.Header().Set("Content-Type", "text/html; charset=utf-8")
-	response.Header().Set("Cache-Control", "no-store")
 	_, _ = response.Write(content)
 }
 
-func (a *app) handlePublicConfig(response http.ResponseWriter, request *http.Request, accountID int64) {
+func (a *app) handleDashboard(response http.ResponseWriter, request *http.Request) {
+	a.setSecurityHeaders(response)
 	if request.Method != http.MethodGet {
 		methodNotAllowed(response, http.MethodGet)
 		return
 	}
-	writeJSON(response, http.StatusOK, fmt.Sprintf(`{"account_id":%d,"allow_reset":%t}`, accountID, a.config.allowReset))
+	userID, requestErr := a.authenticateUser(request)
+	if requestErr != nil {
+		writeRequestError(response, requestErr)
+		return
+	}
+	dashboard, requestErr := a.loadDashboard(request.Context(), userID, request.URL.Query().Get("active") == "1")
+	if requestErr != nil {
+		writeRequestError(response, requestErr)
+		return
+	}
+	writeJSON(response, http.StatusOK, apiResponse{Code: 0, Message: "success", Data: dashboard})
 }
 
-func (a *app) handleUsage(response http.ResponseWriter, request *http.Request, accountID int64) {
-	if request.Method != http.MethodGet {
-		methodNotAllowed(response, http.MethodGet)
+func (a *app) handleAccountAPI(response http.ResponseWriter, request *http.Request) {
+	a.setSecurityHeaders(response)
+	accountID, action, ok := parseAccountAPIPath(request.URL.Path)
+	if !ok {
+		http.NotFound(response, request)
 		return
 	}
-	query := url.Values{}
-	if request.URL.Query().Get("active") == "1" {
-		query.Set("source", "active")
-		query.Set("force", "true")
+
+	userID, requestErr := a.authenticateUser(request)
+	if requestErr != nil {
+		writeRequestError(response, requestErr)
+		return
 	}
-	a.proxyUpstream(response, request, http.MethodGet, fmt.Sprintf("/admin/accounts/%d/usage", accountID), query)
+	allowed, requestErr := a.userCanAccessAccount(request.Context(), userID, accountID)
+	if requestErr != nil {
+		writeRequestError(response, requestErr)
+		return
+	}
+	if !allowed {
+		writeJSON(response, http.StatusForbidden, apiResponse{Code: 403, Message: "账号不属于当前用户的有效订阅分组"})
+		return
+	}
+
+	switch action {
+	case "quota":
+		if request.Method != http.MethodGet {
+			methodNotAllowed(response, http.MethodGet)
+			return
+		}
+		var data json.RawMessage
+		if upstreamErr := a.doAdminRequest(request.Context(), http.MethodGet, "/admin/openai/accounts/"+strconv.FormatInt(accountID, 10)+"/quota", nil, &data); upstreamErr != nil {
+			writeUpstreamError(response, upstreamErr)
+			return
+		}
+		writeJSON(response, http.StatusOK, apiResponse{Code: 0, Message: "success", Data: data})
+	case "reset":
+		if request.Method != http.MethodPost {
+			methodNotAllowed(response, http.MethodPost)
+			return
+		}
+		if !a.config.allowReset {
+			writeJSON(response, http.StatusForbidden, apiResponse{Code: 403, Message: "服务端未开启重置功能"})
+			return
+		}
+		var data json.RawMessage
+		if upstreamErr := a.doAdminRequest(request.Context(), http.MethodPost, "/admin/openai/accounts/"+strconv.FormatInt(accountID, 10)+"/reset-quota", nil, &data); upstreamErr != nil {
+			writeUpstreamError(response, upstreamErr)
+			return
+		}
+		writeJSON(response, http.StatusOK, apiResponse{Code: 0, Message: "success", Data: data})
+	default:
+		http.NotFound(response, request)
+	}
 }
 
-func (a *app) handleQuota(response http.ResponseWriter, request *http.Request, accountID int64) {
-	if request.Method != http.MethodGet {
-		methodNotAllowed(response, http.MethodGet)
-		return
+func parseAccountAPIPath(path string) (int64, string, bool) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 4 || parts[0] != "api" || parts[1] != "accounts" {
+		return 0, "", false
 	}
-	a.proxyUpstream(response, request, http.MethodGet, fmt.Sprintf("/admin/openai/accounts/%d/quota", accountID), nil)
+	accountID, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil || accountID <= 0 {
+		return 0, "", false
+	}
+	if parts[3] != "quota" && parts[3] != "reset" {
+		return 0, "", false
+	}
+	return accountID, parts[3], true
 }
 
-func (a *app) handleReset(response http.ResponseWriter, request *http.Request, accountID int64) {
-	if request.Method != http.MethodPost {
-		methodNotAllowed(response, http.MethodPost)
-		return
-	}
-	if !a.config.allowReset {
-		writeJSON(response, http.StatusForbidden, `{"code":403,"message":"Reset is disabled by server configuration"}`)
-		return
-	}
-	a.proxyUpstream(response, request, http.MethodPost, fmt.Sprintf("/admin/openai/accounts/%d/reset-quota", accountID), nil)
-}
-
-func (a *app) proxyUpstream(response http.ResponseWriter, request *http.Request, method, path string, query url.Values) {
-	target := *a.config.sub2APIURL
-	target.Path = strings.TrimRight(target.Path, "/") + path
-	target.RawQuery = query.Encode()
-
-	upstreamResponse, err := a.doSub2APIRequest(request.Context(), method, target.String())
-	if err != nil {
-		log.Printf("upstream request failed for account endpoint %s: %v", path, err)
-		writeJSON(response, http.StatusBadGateway, `{"code":502,"message":"Unable to reach Sub2API"}`)
-		return
-	}
-	defer upstreamResponse.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(upstreamResponse.Body, maxUpstreamBody+1))
-	if err != nil {
-		writeJSON(response, http.StatusBadGateway, `{"code":502,"message":"Unable to read Sub2API response"}`)
-		return
-	}
-	if len(body) > maxUpstreamBody {
-		writeJSON(response, http.StatusBadGateway, `{"code":502,"message":"Sub2API response is too large"}`)
-		return
-	}
-
-	contentType := upstreamResponse.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "application/json; charset=utf-8"
-	}
-	response.Header().Set("Content-Type", contentType)
+func (a *app) setSecurityHeaders(response http.ResponseWriter) {
 	response.Header().Set("Cache-Control", "no-store")
-	response.WriteHeader(upstreamResponse.StatusCode)
-	_, _ = response.Write(body)
-}
-
-func (a *app) doSub2APIRequest(ctx context.Context, method, target string) (*http.Response, error) {
-	request, err := http.NewRequestWithContext(ctx, method, target, nil)
-	if err != nil {
-		return nil, err
-	}
-	request.Header.Set("Accept", "application/json")
-	request.Header.Set("Accept-Language", "zh-CN")
-	request.Header.Set("x-api-key", a.config.adminAPIKey)
-	request.Header.Set("User-Agent", "sub2api-accountinfo/1.0")
-	request.Header.Set("X-Admin-UI-Request", "1")
-	if method == http.MethodPost {
-		request.Header.Set("Content-Type", "application/json")
-	}
-	return a.client.Do(request)
-}
-
-func setSecurityHeaders(response http.ResponseWriter) {
-	response.Header().Set("Cache-Control", "no-store")
-	response.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+	response.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors "+a.config.frameAncestors)
 	response.Header().Set("Referrer-Policy", "no-referrer")
 	response.Header().Set("X-Content-Type-Options", "nosniff")
-	response.Header().Set("X-Frame-Options", "DENY")
 }
 
 func methodNotAllowed(response http.ResponseWriter, allowed string) {
 	response.Header().Set("Allow", allowed)
-	http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+	writeJSON(response, http.StatusMethodNotAllowed, apiResponse{Code: 405, Message: "method not allowed"})
 }
 
-func writeJSON(response http.ResponseWriter, status int, body string) {
+type apiResponse struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"`
+}
+
+func writeJSON(response http.ResponseWriter, status int, body apiResponse) {
 	response.Header().Set("Content-Type", "application/json; charset=utf-8")
 	response.Header().Set("Cache-Control", "no-store")
 	response.WriteHeader(status)
-	_, _ = response.Write([]byte(body))
+	_ = json.NewEncoder(response).Encode(body)
+}
+
+func writeRequestError(response http.ResponseWriter, requestErr *requestError) {
+	writeJSON(response, requestErr.Status, apiResponse{Code: requestErr.Code, Message: requestErr.Message})
+}
+
+func writeUpstreamError(response http.ResponseWriter, upstreamErr *upstreamAPIError) {
+	status := http.StatusBadGateway
+	if upstreamErr.Status >= 400 && upstreamErr.Status < 500 {
+		status = upstreamErr.Status
+	}
+	code := status
+	if errors.Is(upstreamErr, errSub2APIUnauthorized) {
+		code = http.StatusUnauthorized
+	}
+	writeJSON(response, status, apiResponse{Code: code, Message: upstreamErr.Message})
 }
