@@ -1,0 +1,6 @@
+.git
+.gitignore
+.env
+README.md
+main_test.go
+sub2api-accountinfo

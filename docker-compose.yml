@@ -1,0 +1,9 @@
+services:
+  accountinfo:
+    build: .
+    image: ghcr.io/karllee830/sub2api-accountinfo:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${HOST_PORT:-8080}:8080"
