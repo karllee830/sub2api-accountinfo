@@ -1,7 +1,7 @@
 services:
   accountinfo:
     build: .
-    image: ${CONTAINER_IMAGE:-ghcr.io/karllee830/sub2api-accountinfo:latest}
+    image: ${CONTAINER_IMAGE:-karllee830/sub2api-accountinfo:latest}
     restart: unless-stopped
     env_file:
       - .env

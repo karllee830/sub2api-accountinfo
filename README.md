@@ -58,14 +58,15 @@ proxy_set_header User-Agent $http_user_agent;
 直接使用 Docker Hub 镜像：
 
 ```bash
-docker pull <Docker Hub 用户名>/sub2api-accountinfo:latest
-CONTAINER_IMAGE=<Docker Hub 用户名>/sub2api-accountinfo:latest docker compose up -d
+docker pull karllee830/sub2api-accountinfo:latest
+docker compose up -d
 ```
 
 原有 GHCR 镜像仍会同步发布：
 
 ```bash
 docker pull ghcr.io/karllee830/sub2api-accountinfo:latest
+CONTAINER_IMAGE=ghcr.io/karllee830/sub2api-accountinfo:latest docker compose up -d
 ```
 
 或从当前源码构建：
@@ -109,4 +110,4 @@ node --check web/app.js
 - 推送 `v1.2.3` 格式的 Git 标签：发布 `1.2.3`、`1.2`、`1` 和 `sha-*` 标签；
 - 也可在 GitHub Actions 页面手动运行。
 
-镜像地址分别为 `ghcr.io/karllee830/sub2api-accountinfo` 和 `docker.io/<DOCKERHUB_USERNAME>/sub2api-accountinfo`。GHCR 使用仓库自动提供的 `GITHUB_TOKEN`；Docker Hub 需要仓库 Secret `DOCKERHUB_USERNAME` 和 `DOCKERHUB_TOKEN`。
+镜像地址分别为 `ghcr.io/karllee830/sub2api-accountinfo` 和 `docker.io/karllee830/sub2api-accountinfo`。GHCR 使用仓库自动提供的 `GITHUB_TOKEN`；Docker Hub 需要仓库 Secret `DOCKERHUB_USERNAME` 和 `DOCKERHUB_TOKEN`。
