@@ -7,7 +7,7 @@
 3. 使用仅保存在服务端的 Admin API Key 查询用户的有效订阅；
 4. 查询每个订阅分组绑定的全部账号；
 5. 展示账号平台、账号类型和 5h、7d 等用量窗口；
-6. 对 OpenAI 账号提供剩余重置次数查询，并根据用户自定义属性 `allow_reset` 控制是否显示重置按钮。
+6. 对 OpenAI 账号提供剩余重置次数查询，并通过 `ALLOW_RESET` 和用户自定义属性 `allow_reset` 控制是否显示重置按钮。
 
 浏览器不会收到 Admin API Key。`src_host` 和 `src_url` 只作为 Sub2API 提供的来源信息存在，本项目不会使用它们选择上游地址，避免将管理凭证发送到非预期站点。
 
@@ -23,6 +23,7 @@ cp .env.example .env
 | --- | --- | --- |
 | `SUB2API_URL` | 是 | Sub2API 根地址，程序会自动补 `/api/v1`；也可直接填写 API 地址 |
 | `SUB2API_ADMIN_API_KEY` | 是 | Sub2API 后台生成的 Admin API Key，用于服务端 `x-api-key` 鉴权 |
+| `ALLOW_RESET` | 否 | 默认 `false`，仅允许用户属性 `allow_reset=true` 的用户重置；设为 `true` 时忽略用户属性并允许全部已验证用户重置 |
 | `TRUST_PROXY_HEADERS` | 否 | 是否信任反代传入的客户端 IP，默认 `true`；用于保持 Sub2API Token 的 IP/UA 会话绑定 |
 | `FRAME_ANCESTORS` | 否 | CSP `frame-ancestors` 来源列表；默认使用 `SUB2API_URL` 的 origin |
 | `LISTEN_ADDR` | 否 | 容器内监听地址，默认 `:8080` |
@@ -32,7 +33,10 @@ cp .env.example .env
 
 旧版的 `ACCESS_TOKEN` 和 `ACCOUNT_IDS` 已删除，不再需要配置。账号访问范围完全根据已验证用户的有效订阅分组实时计算。
 
-重置权限通过 Sub2API 用户自定义属性控制：创建并启用 key 为 `allow_reset` 的属性，将用户值设置为 `true` 时显示并允许使用重置按钮；值为 `false`、未设置、格式无效或属性未启用时均不显示，并且服务端会拒绝重置请求。
+重置权限支持两种模式：
+
+- `ALLOW_RESET=true`：全局允许，忽略 Sub2API 用户自定义属性，所有通过身份验证且能访问目标账号的用户都会显示并允许使用重置按钮；
+- `ALLOW_RESET=false`（默认）：全局默认禁止，仅当已启用 key 为 `allow_reset` 的用户自定义属性，且当前用户值为 `true` 时允许重置。值为 `false`、未设置、格式无效或属性未启用时均不显示按钮，服务端也会拒绝请求。
 
 ## Sub2API 嵌入
 
@@ -87,15 +91,15 @@ docker compose up -d --build
 服务端通过 Admin API Key 调用：
 
 - `GET /api/v1/admin/users/:id/subscriptions`
-- `GET /api/v1/admin/user-attributes?enabled=true`
-- `GET /api/v1/admin/users/:id/attributes`
+- `GET /api/v1/admin/user-attributes?enabled=true`（仅 `ALLOW_RESET=false`）
+- `GET /api/v1/admin/users/:id/attributes`（仅 `ALLOW_RESET=false`）
 - `GET /api/v1/admin/accounts?group=:group_id`
 - `GET /api/v1/admin/accounts/:id/usage`
 - `GET /api/v1/admin/accounts/:id/usage?source=active&force=true`
 - `GET /api/v1/admin/openai/accounts/:id/quota`
-- `POST /api/v1/admin/openai/accounts/:id/reset-quota`（仅用户属性 `allow_reset=true`）
+- `POST /api/v1/admin/openai/accounts/:id/reset-quota`（需通过全局开关或用户属性授权）
 
-次数和重置接口仅用于 OpenAI 账号。每次次数或重置请求都会重新验证用户 Token，并重新确认目标账号仍属于该用户的有效订阅分组；重置请求还会实时读取 `allow_reset`，防止通过修改账号 ID 或前端响应越权访问。
+次数和重置接口仅用于 OpenAI 账号。每次次数或重置请求都会重新验证用户 Token，并重新确认目标账号仍属于该用户的有效订阅分组；当 `ALLOW_RESET=false` 时，重置请求还会实时读取 `allow_reset`，防止通过修改账号 ID 或前端响应越权访问。
 
 ## 本地验证
 

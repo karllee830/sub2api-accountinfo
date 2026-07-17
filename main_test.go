@@ -172,6 +172,45 @@ func TestDashboardUsesAllowResetUserAttribute(t *testing.T) {
 	}
 }
 
+func TestDashboardAllowResetConfigBypassesUserAttributes(t *testing.T) {
+	var attributeCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/v1/auth/me":
+			writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":{"id":2}}`)
+		case "/api/v1/admin/users/2/subscriptions":
+			writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":[]}`)
+		case "/api/v1/admin/user-attributes", "/api/v1/admin/users/2/attributes":
+			attributeCalls.Add(1)
+			writeUpstream(response, http.StatusInternalServerError, `{"code":500,"message":"must not be called"}`)
+		default:
+			t.Fatalf("unexpected upstream path %s", request.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := testConfig(t, upstream.URL)
+	cfg.allowReset = true
+	application := newApp(cfg)
+	response := httptest.NewRecorder()
+	application.routes().ServeHTTP(response, embeddedRequest(http.MethodGet, "/api/dashboard"))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Data dashboardResponse `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Data.AllowReset {
+		t.Fatal("ALLOW_RESET=true must allow resets")
+	}
+	if attributeCalls.Load() != 0 {
+		t.Fatalf("user attribute calls = %d, want 0", attributeCalls.Load())
+	}
+}
+
 func assertAdminRequest(t *testing.T, request *http.Request) {
 	t.Helper()
 	if request.Header.Get("x-api-key") != "admin-test-key" {
@@ -227,6 +266,7 @@ func TestDashboardRejectsInvalidToken(t *testing.T) {
 func TestResetRequiresSubscribedAccountAndUserAttribute(t *testing.T) {
 	for _, testCase := range []struct {
 		name           string
+		allowReset     bool
 		attributeValue string
 		accountID      string
 		wantStatus     int
@@ -235,9 +275,11 @@ func TestResetRequiresSubscribedAccountAndUserAttribute(t *testing.T) {
 		{name: "disabled", attributeValue: "false", accountID: "14", wantStatus: http.StatusForbidden},
 		{name: "not subscribed", attributeValue: "true", accountID: "99", wantStatus: http.StatusForbidden},
 		{name: "enabled", attributeValue: "true", accountID: "14", wantStatus: http.StatusOK, wantReset: 1},
+		{name: "global override", allowReset: true, attributeValue: "false", accountID: "14", wantStatus: http.StatusOK, wantReset: 1},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			var resetCalls atomic.Int32
+			var attributeCalls atomic.Int32
 			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 				switch request.URL.Path {
 				case "/api/v1/auth/me":
@@ -247,8 +289,10 @@ func TestResetRequiresSubscribedAccountAndUserAttribute(t *testing.T) {
 				case "/api/v1/admin/accounts":
 					writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":{"items":[{"id":14,"name":"account","platform":"openai","type":"oauth","status":"active"}],"total":1,"page":1,"page_size":100,"pages":1}}`)
 				case "/api/v1/admin/user-attributes":
+					attributeCalls.Add(1)
 					writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":[{"id":7,"key":"allow_reset","enabled":true}]}`)
 				case "/api/v1/admin/users/2/attributes":
+					attributeCalls.Add(1)
 					writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":[{"attribute_id":7,"value":"`+testCase.attributeValue+`"}]}`)
 				case "/api/v1/admin/openai/accounts/14/reset-quota":
 					resetCalls.Add(1)
@@ -259,7 +303,9 @@ func TestResetRequiresSubscribedAccountAndUserAttribute(t *testing.T) {
 			}))
 			defer upstream.Close()
 
-			application := newApp(testConfig(t, upstream.URL))
+			cfg := testConfig(t, upstream.URL)
+			cfg.allowReset = testCase.allowReset
+			application := newApp(cfg)
 			response := httptest.NewRecorder()
 			application.routes().ServeHTTP(response, embeddedRequest(http.MethodPost, "/api/accounts/"+testCase.accountID+"/reset"))
 			if response.Code != testCase.wantStatus {
@@ -267,6 +313,9 @@ func TestResetRequiresSubscribedAccountAndUserAttribute(t *testing.T) {
 			}
 			if resetCalls.Load() != testCase.wantReset {
 				t.Fatalf("reset calls = %d, want %d", resetCalls.Load(), testCase.wantReset)
+			}
+			if testCase.allowReset && attributeCalls.Load() != 0 {
+				t.Fatalf("user attribute calls = %d, want 0", attributeCalls.Load())
 			}
 		})
 	}

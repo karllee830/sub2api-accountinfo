@@ -175,6 +175,10 @@ func (a *app) loadDashboard(ctx context.Context, userID int64, active bool) (*da
 }
 
 func (a *app) userCanReset(ctx context.Context, userID int64) (bool, *requestError) {
+	if a.config.allowReset {
+		return true, nil
+	}
+
 	query := url.Values{"enabled": {"true"}}
 	var definitions []userAttributeDefinition
 	if upstreamErr := a.doAdminRequest(ctx, http.MethodGet, "/admin/user-attributes", query, &definitions); upstreamErr != nil {

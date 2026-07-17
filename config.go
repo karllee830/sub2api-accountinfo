@@ -18,6 +18,7 @@ const (
 type config struct {
 	sub2APIURL        *url.URL
 	adminAPIKey       string
+	allowReset        bool
 	trustProxyHeaders bool
 	frameAncestors    string
 	listenAddr        string
@@ -35,6 +36,10 @@ func loadConfig() (config, error) {
 		return config{}, errors.New("SUB2API_ADMIN_API_KEY is required")
 	}
 
+	allowReset, err := parseBoolEnv("ALLOW_RESET", false)
+	if err != nil {
+		return config{}, err
+	}
 	trustProxyHeaders, err := parseBoolEnv("TRUST_PROXY_HEADERS", true)
 	if err != nil {
 		return config{}, err
@@ -52,6 +57,7 @@ func loadConfig() (config, error) {
 	return config{
 		sub2APIURL:        sub2APIURL,
 		adminAPIKey:       adminAPIKey,
+		allowReset:        allowReset,
 		trustProxyHeaders: trustProxyHeaders,
 		frameAncestors:    frameAncestors,
 		listenAddr:        listenAddr,
