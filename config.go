@@ -16,15 +16,13 @@ const (
 )
 
 type config struct {
-	accessToken          string
-	accountIDs           map[int64]struct{}
-	sub2APIURL           *url.URL
-	sub2APIAdminEmail    string
-	sub2APIAdminPassword string
-	sub2APIStaticToken   string
-	allowReset           bool
-	listenAddr           string
-	requestTimeout       time.Duration
+	accessToken    string
+	accountIDs     map[int64]struct{}
+	sub2APIURL     *url.URL
+	adminAPIKey    string
+	allowReset     bool
+	listenAddr     string
+	requestTimeout time.Duration
 }
 
 func loadConfig() (config, error) {
@@ -43,14 +41,9 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 
-	sub2APIAdminEmail := strings.TrimSpace(os.Getenv("SUB2API_ADMIN_EMAIL"))
-	sub2APIAdminPassword := os.Getenv("SUB2API_ADMIN_PASSWORD")
-	sub2APIStaticToken := strings.TrimSpace(os.Getenv("SUB2API_AUTH_TOKEN"))
-	if (sub2APIAdminEmail == "") != (sub2APIAdminPassword == "") {
-		return config{}, errors.New("SUB2API_ADMIN_EMAIL and SUB2API_ADMIN_PASSWORD must be configured together")
-	}
-	if sub2APIAdminEmail == "" && sub2APIStaticToken == "" {
-		return config{}, errors.New("SUB2API_ADMIN_EMAIL and SUB2API_ADMIN_PASSWORD are required (or use SUB2API_AUTH_TOKEN for compatibility)")
+	adminAPIKey := strings.TrimSpace(os.Getenv("SUB2API_ADMIN_API_KEY"))
+	if adminAPIKey == "" {
+		return config{}, errors.New("SUB2API_ADMIN_API_KEY is required")
 	}
 
 	allowReset, err := parseBoolEnv("ALLOW_RESET", false)
@@ -64,15 +57,13 @@ func loadConfig() (config, error) {
 	}
 
 	return config{
-		accessToken:          accessToken,
-		accountIDs:           accountIDs,
-		sub2APIURL:           sub2APIURL,
-		sub2APIAdminEmail:    sub2APIAdminEmail,
-		sub2APIAdminPassword: sub2APIAdminPassword,
-		sub2APIStaticToken:   sub2APIStaticToken,
-		allowReset:           allowReset,
-		listenAddr:           listenAddr,
-		requestTimeout:       30 * time.Second,
+		accessToken:    accessToken,
+		accountIDs:     accountIDs,
+		sub2APIURL:     sub2APIURL,
+		adminAPIKey:    adminAPIKey,
+		allowReset:     allowReset,
+		listenAddr:     listenAddr,
+		requestTimeout: 30 * time.Second,
 	}, nil
 }
 

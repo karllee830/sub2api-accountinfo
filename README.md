@@ -21,16 +21,12 @@ cp .env.example .env
 | `ACCESS_TOKEN` | 是 | 当前项目的访问口令，放在访问 URL 中；建议使用长随机字符串 |
 | `ACCOUNT_IDS` | 是 | 可访问的账号 ID 白名单，多个 ID 用英文逗号分隔 |
 | `SUB2API_URL` | 是 | Sub2API 根地址，程序会自动补 `/api/v1`；也可直接填写 API 地址 |
-| `SUB2API_ADMIN_EMAIL` | 是* | Sub2API 管理员邮箱，与管理员密码一起使用 |
-| `SUB2API_ADMIN_PASSWORD` | 是* | Sub2API 管理员密码；程序自动登录并缓存令牌 |
-| `SUB2API_AUTH_TOKEN` | 否 | 兼容模式；管理员启用 TOTP 2FA 或登录 Turnstile 时可直接提供 `access_token` |
+| `SUB2API_ADMIN_API_KEY` | 是 | Sub2API 后台生成的 Admin API Key，用于 `x-api-key` 鉴权 |
 | `ALLOW_RESET` | 否 | `true` 允许重置，默认 `false`；服务端也会强制校验，不能只靠前端绕过 |
 | `LISTEN_ADDR` | 否 | 容器内监听地址，默认 `:8080` |
 | `HOST_PORT` | 否 | Docker Compose 映射到宿主机的端口，默认 `8080` |
 
-默认使用 `SUB2API_ADMIN_EMAIL` 和 `SUB2API_ADMIN_PASSWORD`。程序会调用 `/api/v1/auth/login` 自动登录，在令牌过期或上游返回 `401` 时使用 `refresh_token` 续期；刷新失败则自动重新登录。
-
-如果管理员账号启用了 TOTP 2FA，或 Sub2API 登录启用了 Turnstile，请不要配置账号密码，改用 `SUB2API_AUTH_TOKEN` 兼容模式。该令牌可从已登录管理页面的 `localStorage.auth_token` 获取。账号密码和兼容令牌至少配置一种。
+`SUB2API_ADMIN_API_KEY` 可在 Sub2API 管理后台的“设置 → 安全 → Admin API Key”中生成。完整 Key 只在生成时显示一次；本项目仅通过服务端请求头 `x-api-key` 使用它，不会发送给浏览器。
 
 ## Docker 运行
 

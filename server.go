@@ -1,9 +1,9 @@
 package main
 
 import (
+	"context"
 	"crypto/subtle"
 	"embed"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -19,11 +19,10 @@ var webFiles embed.FS
 type app struct {
 	config config
 	client *http.Client
-	auth   sub2APIAuthState
 }
 
 func newApp(cfg config) *app {
-	application := &app{
+	return &app{
 		config: cfg,
 		client: &http.Client{
 			Timeout: cfg.requestTimeout,
@@ -32,10 +31,6 @@ func newApp(cfg config) *app {
 			},
 		},
 	}
-	if cfg.sub2APIAdminEmail == "" {
-		application.auth.accessToken = cfg.sub2APIStaticToken
-	}
-	return application
 }
 
 func (a *app) routes() http.Handler {
@@ -197,33 +192,11 @@ func (a *app) proxyUpstream(response http.ResponseWriter, request *http.Request,
 	target.Path = strings.TrimRight(target.Path, "/") + path
 	target.RawQuery = query.Encode()
 
-	authToken, err := a.getSub2APIAccessToken(request.Context())
-	if err != nil {
-		log.Printf("Sub2API authentication failed: %v", err)
-		writeAPIError(response, http.StatusBadGateway, "Sub2API authentication failed: "+err.Error())
-		return
-	}
-
-	upstreamResponse, err := a.doSub2APIRequest(request.Context(), method, target.String(), authToken)
+	upstreamResponse, err := a.doSub2APIRequest(request.Context(), method, target.String())
 	if err != nil {
 		log.Printf("upstream request failed for account endpoint %s: %v", path, err)
 		writeJSON(response, http.StatusBadGateway, `{"code":502,"message":"Unable to reach Sub2API"}`)
 		return
-	}
-	if upstreamResponse.StatusCode == http.StatusUnauthorized && a.usesPasswordAuthentication() {
-		_ = upstreamResponse.Body.Close()
-		authToken, err = a.renewSub2APIAccessToken(request.Context(), authToken)
-		if err != nil {
-			log.Printf("Sub2API reauthentication failed: %v", err)
-			writeAPIError(response, http.StatusBadGateway, "Sub2API reauthentication failed: "+err.Error())
-			return
-		}
-		upstreamResponse, err = a.doSub2APIRequest(request.Context(), method, target.String(), authToken)
-		if err != nil {
-			log.Printf("upstream retry failed for account endpoint %s: %v", path, err)
-			writeJSON(response, http.StatusBadGateway, `{"code":502,"message":"Unable to reach Sub2API"}`)
-			return
-		}
 	}
 	defer upstreamResponse.Body.Close()
 
@@ -247,6 +220,22 @@ func (a *app) proxyUpstream(response http.ResponseWriter, request *http.Request,
 	_, _ = response.Write(body)
 }
 
+func (a *app) doSub2APIRequest(ctx context.Context, method, target string) (*http.Response, error) {
+	request, err := http.NewRequestWithContext(ctx, method, target, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Accept-Language", "zh-CN")
+	request.Header.Set("x-api-key", a.config.adminAPIKey)
+	request.Header.Set("User-Agent", "sub2api-accountinfo/1.0")
+	request.Header.Set("X-Admin-UI-Request", "1")
+	if method == http.MethodPost {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	return a.client.Do(request)
+}
+
 func setSecurityHeaders(response http.ResponseWriter) {
 	response.Header().Set("Cache-Control", "no-store")
 	response.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
@@ -265,16 +254,4 @@ func writeJSON(response http.ResponseWriter, status int, body string) {
 	response.Header().Set("Cache-Control", "no-store")
 	response.WriteHeader(status)
 	_, _ = response.Write([]byte(body))
-}
-
-func writeAPIError(response http.ResponseWriter, status int, message string) {
-	body, err := json.Marshal(map[string]any{
-		"code":    status,
-		"message": message,
-	})
-	if err != nil {
-		writeJSON(response, status, `{"code":500,"message":"Unable to encode error response"}`)
-		return
-	}
-	writeJSON(response, status, string(body))
 }

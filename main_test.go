@@ -18,23 +18,14 @@ func testConfig(t *testing.T, upstreamURL string, allowReset bool) config {
 		t.Fatalf("normalizeSub2APIURL: %v", err)
 	}
 	return config{
-		accessToken:        "viewer-secret",
-		accountIDs:         map[int64]struct{}{42: {}},
-		sub2APIURL:         parsed,
-		sub2APIStaticToken: "admin-bearer",
-		allowReset:         allowReset,
-		listenAddr:         defaultListenAddr,
-		requestTimeout:     time.Second,
+		accessToken:    "viewer-secret",
+		accountIDs:     map[int64]struct{}{42: {}},
+		sub2APIURL:     parsed,
+		adminAPIKey:    "admin-test-key",
+		allowReset:     allowReset,
+		listenAddr:     defaultListenAddr,
+		requestTimeout: time.Second,
 	}
-}
-
-func passwordTestConfig(t *testing.T, upstreamURL string) config {
-	t.Helper()
-	cfg := testConfig(t, upstreamURL, false)
-	cfg.sub2APIStaticToken = ""
-	cfg.sub2APIAdminEmail = "admin@example.com"
-	cfg.sub2APIAdminPassword = "correct-password"
-	return cfg
 }
 
 func TestProtectedPageRequiresTokenAndAllowedAccount(t *testing.T) {
@@ -67,8 +58,11 @@ func TestActiveUsageProxiesExpectedRequest(t *testing.T) {
 		if request.URL.Query().Get("source") != "active" || request.URL.Query().Get("force") != "true" {
 			t.Errorf("query = %q", request.URL.RawQuery)
 		}
-		if request.Header.Get("Authorization") != "Bearer admin-bearer" {
-			t.Errorf("Authorization = %q", request.Header.Get("Authorization"))
+		if request.Header.Get("x-api-key") != "admin-test-key" {
+			t.Errorf("x-api-key = %q", request.Header.Get("x-api-key"))
+		}
+		if request.Header.Get("Authorization") != "" {
+			t.Errorf("Authorization must be empty, got %q", request.Header.Get("Authorization"))
 		}
 		if request.Header.Get("X-Admin-UI-Request") != "1" {
 			t.Errorf("X-Admin-UI-Request = %q", request.Header.Get("X-Admin-UI-Request"))
@@ -131,85 +125,6 @@ func TestResetEnabledProxiesExpectedRequest(t *testing.T) {
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
-	}
-}
-
-func TestPasswordAuthenticationRefreshesAndRetriesAfterUnauthorized(t *testing.T) {
-	var loginCalls atomic.Int32
-	var refreshCalls atomic.Int32
-	var usageCalls atomic.Int32
-
-	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		response.Header().Set("Content-Type", "application/json")
-		switch request.URL.Path {
-		case "/api/v1/auth/login":
-			loginCalls.Add(1)
-			body, _ := io.ReadAll(request.Body)
-			if !strings.Contains(string(body), `"email":"admin@example.com"`) || !strings.Contains(string(body), `"password":"correct-password"`) {
-				t.Errorf("unexpected login body: %s", string(body))
-			}
-			_, _ = response.Write([]byte(`{"code":0,"message":"success","data":{"access_token":"access-one","refresh_token":"refresh-one","expires_in":3600}}`))
-		case "/api/v1/auth/refresh":
-			refreshCalls.Add(1)
-			body, _ := io.ReadAll(request.Body)
-			if !strings.Contains(string(body), `"refresh_token":"refresh-one"`) {
-				t.Errorf("unexpected refresh body: %s", string(body))
-			}
-			_, _ = response.Write([]byte(`{"code":0,"message":"success","data":{"access_token":"access-two","refresh_token":"refresh-two","expires_in":3600}}`))
-		case "/api/v1/admin/accounts/42/usage":
-			call := usageCalls.Add(1)
-			if call == 1 {
-				if request.Header.Get("Authorization") != "Bearer access-one" {
-					t.Errorf("first Authorization = %q", request.Header.Get("Authorization"))
-				}
-				response.WriteHeader(http.StatusUnauthorized)
-				_, _ = response.Write([]byte(`{"code":401,"message":"token expired"}`))
-				return
-			}
-			if request.Header.Get("Authorization") != "Bearer access-two" {
-				t.Errorf("retried Authorization = %q", request.Header.Get("Authorization"))
-			}
-			_, _ = response.Write([]byte(`{"code":0,"message":"success","data":{"five_hour":{"utilization":12}}}`))
-		default:
-			http.NotFound(response, request)
-		}
-	}))
-	defer upstream.Close()
-
-	application := newApp(passwordTestConfig(t, upstream.URL))
-	request := httptest.NewRequest(http.MethodGet, "/viewer-secret/42/api/usage", nil)
-	response := httptest.NewRecorder()
-	application.routes().ServeHTTP(response, request)
-
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d body = %s", response.Code, response.Body.String())
-	}
-	if loginCalls.Load() != 1 || refreshCalls.Load() != 1 || usageCalls.Load() != 2 {
-		t.Fatalf("calls: login=%d refresh=%d usage=%d", loginCalls.Load(), refreshCalls.Load(), usageCalls.Load())
-	}
-}
-
-func TestPasswordAuthenticationRejectsTwoFactorLogin(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != "/api/v1/auth/login" {
-			http.NotFound(response, request)
-			return
-		}
-		response.Header().Set("Content-Type", "application/json")
-		_, _ = response.Write([]byte(`{"code":0,"message":"success","data":{"requires_2fa":true,"temp_token":"temporary"}}`))
-	}))
-	defer upstream.Close()
-
-	application := newApp(passwordTestConfig(t, upstream.URL))
-	request := httptest.NewRequest(http.MethodGet, "/viewer-secret/42/api/quota", nil)
-	response := httptest.NewRecorder()
-	application.routes().ServeHTTP(response, request)
-
-	if response.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d body = %s", response.Code, response.Body.String())
-	}
-	if !strings.Contains(response.Body.String(), "TOTP 2FA") {
-		t.Fatalf("unexpected body: %s", response.Body.String())
 	}
 }
 
