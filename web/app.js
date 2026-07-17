@@ -226,17 +226,18 @@
   }
 
   function updateResetButton() {
+    elements.resetButton.classList.toggle('is-hidden', !state.allowReset)
     const canReset = state.allowReset && state.quota !== null && availableCount() > 0 && state.busy.size === 0
     elements.resetButton.disabled = !canReset
-    if (!state.allowReset) elements.resetButton.title = 'Docker 环境变量已禁用重置'
-    else if (state.quota === null) elements.resetButton.title = '请先点击“次数”查询可用次数'
+    if (!state.allowReset) elements.resetButton.title = ''
+    else if (state.quota === null) elements.resetButton.title = '请先点击“剩余重置次数”查询可用次数'
     else if (availableCount() <= 0) elements.resetButton.title = '当前没有可用重置次数'
     else elements.resetButton.title = '消耗一次额度并重置用量窗口'
   }
 
   function renderQuota(data) {
     state.quota = data
-    elements.countLabel.textContent = `次数 ${availableCount()}`
+    elements.countLabel.textContent = `剩余重置次数 ${availableCount()}`
     const credits = data?.rate_limit_reset_credits?.credits || []
     const expirations = credits
       .map((credit) => credit?.expires_at)
@@ -304,9 +305,13 @@
       state.allowReset = Boolean(publicConfig.allow_reset)
       elements.accountBadge.textContent = `账号 #${publicConfig.account_id}`
       document.title = `账号 #${publicConfig.account_id} 用量`
-      elements.resetPolicy.textContent = state.allowReset
-        ? '重置功能已由服务端开启；查询到可用次数后即可操作。'
-        : '重置功能已由服务端关闭，仅允许查询用量和可用次数。'
+      if (state.allowReset) {
+        elements.resetPolicy.textContent = '重置功能已由服务端开启；查询到可用次数后即可操作。'
+        elements.resetPolicy.classList.remove('is-hidden')
+      } else {
+        elements.resetPolicy.textContent = ''
+        elements.resetPolicy.classList.add('is-hidden')
+      }
       updateResetButton()
       await loadUsage(false)
     } catch (error) {
