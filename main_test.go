@@ -312,6 +312,25 @@ func TestResetUsesCustomConfirmationDialog(t *testing.T) {
 	}
 }
 
+func TestQuotaPanelShowsEveryCreditExpiration(t *testing.T) {
+	script, err := webFiles.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(script)
+	for _, text := range []string{
+		"查看重置额度",
+		"剩余次数与全部到期时间",
+		"credits.forEach",
+		"formatFullDate(credit.expiresAt)",
+		"按当前设备时区显示",
+	} {
+		if !strings.Contains(content, text) {
+			t.Fatalf("quota panel is missing %q", text)
+		}
+	}
+}
+
 func TestNormalizeSub2APIURL(t *testing.T) {
 	testCases := []struct {
 		input string

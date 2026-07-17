@@ -226,6 +226,34 @@
     }).format(date)
   }
 
+  function formatFullDate(value) {
+    const date = new Date(value)
+    if (Number.isNaN(date.getTime())) return String(value || '到期时间未提供')
+    return new Intl.DateTimeFormat(undefined, {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    }).format(date)
+  }
+
+  function formatExpiryDistance(value) {
+    const expiresAt = new Date(value).getTime()
+    if (!Number.isFinite(expiresAt)) return '到期时间格式未知'
+    const remaining = expiresAt - Date.now()
+    if (remaining <= 0) return '已到期'
+    const minutes = Math.max(1, Math.ceil(remaining / 60000))
+    const days = Math.floor(minutes / 1440)
+    const hours = Math.floor((minutes % 1440) / 60)
+    const restMinutes = minutes % 60
+    if (days > 0) return `${days}天${hours > 0 ? ` ${hours}小时` : ''}后到期`
+    if (hours > 0) return `${hours}小时${restMinutes > 0 ? ` ${restMinutes}分钟` : ''}后到期`
+    return `${restMinutes}分钟后到期`
+  }
+
   function formatResetTime(value, utilization) {
     if (!value) return '-'
     const resetAt = new Date(value)
@@ -303,6 +331,106 @@
     return Number(quota?.rate_limit_reset_credits?.available_count) || 0
   }
 
+  function resetCreditExpirations(quota) {
+    const credits = quota?.rate_limit_reset_credits?.credits
+    if (!Array.isArray(credits)) return []
+    return credits
+      .map((credit, index) => ({
+        expiresAt: String(credit?.expires_at || '').trim(),
+        index
+      }))
+      .sort((left, right) => {
+        const leftTime = new Date(left.expiresAt).getTime()
+        const rightTime = new Date(right.expiresAt).getTime()
+        const safeLeftTime = Number.isFinite(leftTime) ? leftTime : Number.POSITIVE_INFINITY
+        const safeRightTime = Number.isFinite(rightTime) ? rightTime : Number.POSITIVE_INFINITY
+        return safeLeftTime - safeRightTime || left.index - right.index
+      })
+  }
+
+  function renderCreditPanel(panel, quota) {
+    const count = availableCount(quota)
+    const credits = resetCreditExpirations(quota)
+    const summary = document.createElement('div')
+    summary.className = 'credit-summary'
+
+    const summaryIcon = document.createElement('span')
+    summaryIcon.className = 'credit-summary-icon'
+    summaryIcon.setAttribute('aria-hidden', 'true')
+    summaryIcon.textContent = '↻'
+
+    const summaryCopy = document.createElement('div')
+    summaryCopy.className = 'credit-summary-copy'
+    const kicker = document.createElement('p')
+    kicker.className = 'credit-kicker'
+    kicker.textContent = 'RESET CREDITS'
+    const title = document.createElement('h4')
+    title.textContent = '重置额度'
+    const description = document.createElement('p')
+    description.textContent = '每次重置用量窗口会消耗 1 次额度'
+    summaryCopy.append(kicker, title, description)
+
+    const countBadge = document.createElement('div')
+    countBadge.className = `credit-count${count > 0 ? '' : ' is-empty'}`
+    const countValue = document.createElement('strong')
+    countValue.textContent = String(count)
+    const countLabel = document.createElement('span')
+    countLabel.textContent = '次可用'
+    countBadge.append(countValue, countLabel)
+    summary.append(summaryIcon, summaryCopy, countBadge)
+
+    const expirationSection = document.createElement('div')
+    expirationSection.className = 'credit-expirations'
+    const expirationHeader = document.createElement('div')
+    expirationHeader.className = 'credit-expiration-header'
+    const expirationTitle = document.createElement('span')
+    expirationTitle.textContent = '额度到期时间'
+    const timezoneHint = document.createElement('span')
+    timezoneHint.textContent = '按当前设备时区显示'
+    expirationHeader.append(expirationTitle, timezoneHint)
+    expirationSection.append(expirationHeader)
+
+    if (credits.length > 0) {
+      const list = document.createElement('ol')
+      list.className = 'credit-expiration-list'
+      credits.forEach((credit, index) => {
+        const item = document.createElement('li')
+        const label = document.createElement('span')
+        label.className = 'credit-expiration-label'
+        label.textContent = `额度 ${index + 1}`
+        const timing = document.createElement('div')
+        timing.className = 'credit-expiration-timing'
+        const time = document.createElement('time')
+        time.textContent = formatFullDate(credit.expiresAt)
+        if (credit.expiresAt) {
+          time.dateTime = credit.expiresAt
+          time.title = credit.expiresAt
+        }
+        const distance = document.createElement('span')
+        distance.textContent = credit.expiresAt ? formatExpiryDistance(credit.expiresAt) : '服务端未返回到期时间'
+        timing.append(time, distance)
+        item.append(label, timing)
+        list.append(item)
+      })
+      expirationSection.append(list)
+      const missingCount = Math.max(count - credits.length, 0)
+      if (missingCount > 0) {
+        const missing = document.createElement('p')
+        missing.className = 'credit-expiration-note'
+        missing.textContent = `另有 ${missingCount} 次额度未返回具体到期时间`
+        expirationSection.append(missing)
+      }
+    } else {
+      const empty = document.createElement('p')
+      empty.className = 'credit-expiration-empty'
+      empty.textContent = count > 0 ? '服务端暂未返回具体到期时间' : '当前没有可用的重置额度'
+      expirationSection.append(empty)
+    }
+
+    panel.replaceChildren(summary, expirationSection)
+    panel.classList.remove('is-hidden')
+  }
+
   function renderAccountActions(container, account, allowReset) {
     if (account.platform !== 'openai') return
 
@@ -310,8 +438,24 @@
     actionRow.className = 'account-actions'
     const countButton = document.createElement('button')
     countButton.type = 'button'
-    countButton.className = 'button button-count'
-    countButton.textContent = '剩余重置次数'
+    countButton.className = 'button quota-query-button'
+    const countIcon = document.createElement('span')
+    countIcon.className = 'button-icon quota-query-icon'
+    countIcon.setAttribute('aria-hidden', 'true')
+    const countGlyph = document.createElement('span')
+    countGlyph.className = 'quota-query-glyph'
+    countGlyph.textContent = '↻'
+    countIcon.append(countGlyph)
+    const countCopy = document.createElement('span')
+    countCopy.className = 'quota-query-copy'
+    const countLabel = document.createElement('span')
+    countLabel.className = 'quota-query-label'
+    countLabel.textContent = '查看重置额度'
+    const countHint = document.createElement('span')
+    countHint.className = 'quota-query-hint'
+    countHint.textContent = '剩余次数与全部到期时间'
+    countCopy.append(countLabel, countHint)
+    countButton.append(countIcon, countCopy)
     actionRow.append(countButton)
 
     let resetButton = null
@@ -324,15 +468,19 @@
       actionRow.append(resetButton)
     }
 
-    const creditInfo = document.createElement('div')
-    creditInfo.className = 'credit-info is-hidden'
+    const creditPanel = document.createElement('section')
+    creditPanel.id = `credit-panel-${account.id}`
+    creditPanel.className = 'credit-panel is-hidden'
+    creditPanel.setAttribute('aria-live', 'polite')
+    countButton.setAttribute('aria-controls', creditPanel.id)
+    countButton.setAttribute('aria-expanded', 'false')
     let quota = null
 
     function updateResetButton() {
       if (!resetButton) return
       resetButton.disabled = quota === null || availableCount(quota) <= 0
       resetButton.title = quota === null
-        ? '请先查询剩余重置次数'
+        ? '请先查看重置额度'
         : availableCount(quota) > 0
           ? '消耗一次额度并重置用量窗口'
           : '当前没有可用重置次数'
@@ -341,27 +489,21 @@
     async function loadQuota() {
       countButton.disabled = true
       countButton.classList.add('is-loading')
+      countLabel.textContent = quota === null ? '正在查询额度…' : '正在刷新额度…'
+      countHint.textContent = '正在获取最新额度信息'
       clearError()
       try {
         quota = await request(`accounts/${account.id}/quota`)
-        countButton.textContent = `剩余重置次数 ${availableCount(quota)}`
-        const credits = quota?.rate_limit_reset_credits?.credits || []
-        const expirations = credits
-          .map((credit) => credit?.expires_at)
-          .filter(Boolean)
-          .sort((left, right) => new Date(left).getTime() - new Date(right).getTime())
-        if (expirations.length > 0) {
-          const rest = expirations.length > 1 ? `，另有 ${expirations.length - 1} 次` : ''
-          creditInfo.textContent = `最早到期：${formatDate(expirations[0])}${rest}`
-          creditInfo.classList.remove('is-hidden')
-        } else {
-          creditInfo.textContent = ''
-          creditInfo.classList.add('is-hidden')
-        }
+        renderCreditPanel(creditPanel, quota)
+        countButton.setAttribute('aria-expanded', 'true')
         updateResetButton()
       } catch (error) {
         showError(error)
       } finally {
+        countLabel.textContent = quota === null ? '重新查询额度' : '刷新重置额度'
+        countHint.textContent = quota === null
+          ? '查询失败，点击重新获取'
+          : `当前剩余 ${availableCount(quota)} 次，点击刷新`
         countButton.disabled = false
         countButton.classList.remove('is-loading')
       }
@@ -390,7 +532,7 @@
       })
     }
 
-    container.append(actionRow, creditInfo)
+    container.append(actionRow, creditPanel)
   }
 
   function renderAccount(account, allowReset) {
