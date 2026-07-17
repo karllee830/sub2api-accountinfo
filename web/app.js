@@ -29,10 +29,10 @@
   }
 
   const windowDefinitions = [
-    ['five_hour', '5h'],
-    ['seven_day', '7d'],
-    ['seven_day_sonnet', '7d S'],
-    ['seven_day_fable', '7d F']
+    ['five_hour', '5小时'],
+    ['seven_day', '7天'],
+    ['seven_day_sonnet', '7天 S'],
+    ['seven_day_fable', '7天 F']
   ]
 
   const accountTypeLabels = {
