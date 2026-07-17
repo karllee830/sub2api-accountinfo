@@ -13,12 +13,11 @@ permissions:
   packages: write
 
 concurrency:
-  group: publish-ghcr-${{ github.ref }}
+  group: publish-containers-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  IMAGE_NAME: sub2api-accountinfo
 
 jobs:
   build_amd64:
@@ -37,9 +36,16 @@ jobs:
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4.4.0
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4.4.0
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push AMD64 digest
         id: build
@@ -48,7 +54,9 @@ jobs:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          outputs: |
+            type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
+            type=image,name=docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=build-amd64
           cache-to: type=gha,mode=max,scope=build-amd64
           provenance: mode=max
@@ -70,9 +78,16 @@ jobs:
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4.4.0
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4.4.0
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push ARM64 digest
         id: build
@@ -81,7 +96,9 @@ jobs:
           context: .
           file: ./Dockerfile
           platforms: linux/arm64
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          outputs: |
+            type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
+            type=image,name=docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=build-arm64
           cache-to: type=gha,mode=max,scope=build-arm64
           provenance: mode=max
@@ -101,15 +118,22 @@ jobs:
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4.4.0
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract image metadata
-        id: metadata
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4.4.0
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract GHCR image metadata
+        id: metadata_ghcr
         uses: docker/metadata-action@v6.2.0
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ghcr.io/${{ github.repository }}
           tags: |
             type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
             type=ref,event=branch
@@ -118,19 +142,41 @@ jobs:
             type=semver,pattern={{major}}
             type=sha,prefix=sha-
 
-      - name: Create and push manifest
+      - name: Extract Docker Hub image metadata
+        id: metadata_dockerhub
+        uses: docker/metadata-action@v6.2.0
+        with:
+          images: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix=sha-
+
+      - name: Create and push manifests
         env:
           AMD64_DIGEST: ${{ needs.build_amd64.outputs.digest }}
           ARM64_DIGEST: ${{ needs.build_arm64.outputs.digest }}
-          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          METADATA: ${{ steps.metadata.outputs.json }}
+          GHCR_IMAGE: ghcr.io/${{ github.repository }}
+          GHCR_METADATA: ${{ steps.metadata_ghcr.outputs.json }}
+          DOCKERHUB_IMAGE: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+          DOCKERHUB_METADATA: ${{ steps.metadata_dockerhub.outputs.json }}
         run: |
-          mapfile -t tags < <(jq -r '.tags[]' <<< "$METADATA")
-          tag_args=()
-          for tag in "${tags[@]}"; do
-            tag_args+=(--tag "$tag")
-          done
-          docker buildx imagetools create "${tag_args[@]}" \
-            "$IMAGE@$AMD64_DIGEST" \
-            "$IMAGE@$ARM64_DIGEST"
-          docker buildx imagetools inspect "${tags[0]}"
+          publish_manifest() {
+            local image="$1"
+            local metadata="$2"
+            mapfile -t tags < <(jq -r '.tags[]' <<< "$metadata")
+            tag_args=()
+            for tag in "${tags[@]}"; do
+              tag_args+=(--tag "$tag")
+            done
+            docker buildx imagetools create "${tag_args[@]}" \
+              "$image@$AMD64_DIGEST" \
+              "$image@$ARM64_DIGEST"
+            docker buildx imagetools inspect "${tags[0]}"
+          }
+
+          publish_manifest "$GHCR_IMAGE" "$GHCR_METADATA"
+          publish_manifest "$DOCKERHUB_IMAGE" "$DOCKERHUB_METADATA"

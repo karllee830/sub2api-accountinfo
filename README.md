@@ -55,11 +55,17 @@ proxy_set_header User-Agent $http_user_agent;
 
 ## Docker 运行
 
-直接使用 GHCR 镜像：
+直接使用 Docker Hub 镜像：
+
+```bash
+docker pull <Docker Hub 用户名>/sub2api-accountinfo:latest
+CONTAINER_IMAGE=<Docker Hub 用户名>/sub2api-accountinfo:latest docker compose up -d
+```
+
+原有 GHCR 镜像仍会同步发布：
 
 ```bash
 docker pull ghcr.io/karllee830/sub2api-accountinfo:latest
-docker compose up -d
 ```
 
 或从当前源码构建：
@@ -97,10 +103,10 @@ node --check web/app.js
 
 ## 自动发布镜像
 
-工作流 `.github/workflows/publish-ghcr.yml` 会并行构建 `linux/amd64` 和 `linux/arm64` 镜像。AMD64 使用标准 runner，ARM64 使用原生 `ubuntu-24.04-arm` runner；两个 Job 分别推送 digest，完成后再合并为同一个多架构 manifest：
+工作流 `.github/workflows/publish-ghcr.yml` 会并行构建 `linux/amd64` 和 `linux/arm64` 镜像。AMD64 使用标准 runner，ARM64 使用原生 `ubuntu-24.04-arm` runner；每个平台只构建一次并同时推送到 GHCR 和 Docker Hub，完成后分别合并为多架构 manifest：
 
 - 推送到 `main`：发布 `latest`、`main` 和 `sha-*` 标签；
 - 推送 `v1.2.3` 格式的 Git 标签：发布 `1.2.3`、`1.2`、`1` 和 `sha-*` 标签；
 - 也可在 GitHub Actions 页面手动运行。
 
-镜像地址固定为 `ghcr.io/karllee830/sub2api-accountinfo`，发布使用仓库自动提供的 `GITHUB_TOKEN`，无需额外配置 GHCR 密码。
+镜像地址分别为 `ghcr.io/karllee830/sub2api-accountinfo` 和 `docker.io/<DOCKERHUB_USERNAME>/sub2api-accountinfo`。GHCR 使用仓库自动提供的 `GITHUB_TOKEN`；Docker Hub 需要仓库 Secret `DOCKERHUB_USERNAME` 和 `DOCKERHUB_TOKEN`。
