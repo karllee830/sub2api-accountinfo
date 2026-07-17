@@ -143,8 +143,13 @@ func (a *app) handleAccountAPI(response http.ResponseWriter, request *http.Reque
 			methodNotAllowed(response, http.MethodPost)
 			return
 		}
-		if !a.config.allowReset {
-			writeJSON(response, http.StatusForbidden, apiResponse{Code: 403, Message: "服务端未开启重置功能"})
+		allowReset, requestErr := a.userCanReset(request.Context(), userID)
+		if requestErr != nil {
+			writeRequestError(response, requestErr)
+			return
+		}
+		if !allowReset {
+			writeJSON(response, http.StatusForbidden, apiResponse{Code: 403, Message: "当前用户没有重置权限"})
 			return
 		}
 		var data json.RawMessage

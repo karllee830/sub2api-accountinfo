@@ -36,7 +36,7 @@ func main() {
 		}
 	}()
 
-	log.Printf("sub2api-accountinfo listening on %s (reset enabled: %t)", cfg.listenAddr, cfg.allowReset)
+	log.Printf("sub2api-accountinfo listening on %s", cfg.listenAddr)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("server failed: %v", err)
 	}

@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func testConfig(t *testing.T, upstreamURL string, allowReset bool) config {
+func testConfig(t *testing.T, upstreamURL string) config {
 	t.Helper()
 	parsed, err := normalizeSub2APIURL(upstreamURL)
 	if err != nil {
@@ -20,7 +20,6 @@ func testConfig(t *testing.T, upstreamURL string, allowReset bool) config {
 	return config{
 		sub2APIURL:        parsed,
 		adminAPIKey:       "admin-test-key",
-		allowReset:        allowReset,
 		trustProxyHeaders: true,
 		frameAncestors:    "https://sub2api.example",
 		listenAddr:        defaultListenAddr,
@@ -60,6 +59,15 @@ func TestDashboardAuthenticatesUserAndLoadsSubscribedAccountUsage(t *testing.T) 
 				t.Errorf("forwarded user agent = %q", request.UserAgent())
 			}
 			writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":{"id":2,"status":"active"}}`)
+		case "/api/v1/admin/user-attributes":
+			assertAdminRequest(t, request)
+			if request.URL.Query().Get("enabled") != "true" {
+				t.Errorf("enabled query = %q", request.URL.Query().Get("enabled"))
+			}
+			writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":[{"id":7,"key":"allow_reset","enabled":true}]}`)
+		case "/api/v1/admin/users/2/attributes":
+			assertAdminRequest(t, request)
+			writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":[{"attribute_id":7,"value":"true"}]}`)
 		case "/api/v1/admin/users/2/subscriptions":
 			assertAdminRequest(t, request)
 			writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":[{"id":1,"user_id":2,"group_id":9,"status":"active","expires_at":null,"group":{"id":9,"name":"test","platform":"openai","status":"active","subscription_type":"subscription"}}]}`)
@@ -81,7 +89,7 @@ func TestDashboardAuthenticatesUserAndLoadsSubscribedAccountUsage(t *testing.T) 
 	}))
 	defer upstream.Close()
 
-	application := newApp(testConfig(t, upstream.URL, false))
+	application := newApp(testConfig(t, upstream.URL))
 	response := httptest.NewRecorder()
 	application.routes().ServeHTTP(response, embeddedRequest(http.MethodGet, "/api/dashboard?active=1"))
 
@@ -95,7 +103,7 @@ func TestDashboardAuthenticatesUserAndLoadsSubscribedAccountUsage(t *testing.T) 
 	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Code != 0 || result.Data.UserID != 2 || len(result.Data.Groups) != 1 {
+	if result.Code != 0 || result.Data.UserID != 2 || !result.Data.AllowReset || len(result.Data.Groups) != 1 {
 		t.Fatalf("unexpected dashboard: %+v", result)
 	}
 	accounts := result.Data.Groups[0].Accounts
@@ -107,6 +115,60 @@ func TestDashboardAuthenticatesUserAndLoadsSubscribedAccountUsage(t *testing.T) 
 	}
 	if strings.Contains(response.Body.String(), "must-not-leak") {
 		t.Fatal("account credentials leaked to dashboard response")
+	}
+}
+
+func TestDashboardUsesAllowResetUserAttribute(t *testing.T) {
+	testCases := []struct {
+		name              string
+		includeDefinition bool
+		attributeValue    string
+		wantAllowReset    bool
+	}{
+		{name: "true", includeDefinition: true, attributeValue: "true", wantAllowReset: true},
+		{name: "false", includeDefinition: true, attributeValue: "false"},
+		{name: "invalid", includeDefinition: true, attributeValue: "enabled"},
+		{name: "missing definition"},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				switch request.URL.Path {
+				case "/api/v1/auth/me":
+					writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":{"id":2}}`)
+				case "/api/v1/admin/user-attributes":
+					if testCase.includeDefinition {
+						writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":[{"id":7,"key":"allow_reset","enabled":true}]}`)
+					} else {
+						writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":[]}`)
+					}
+				case "/api/v1/admin/users/2/attributes":
+					writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":[{"attribute_id":7,"value":"`+testCase.attributeValue+`"}]}`)
+				case "/api/v1/admin/users/2/subscriptions":
+					writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":[]}`)
+				default:
+					t.Fatalf("unexpected upstream path %s", request.URL.Path)
+				}
+			}))
+			defer upstream.Close()
+
+			application := newApp(testConfig(t, upstream.URL))
+			response := httptest.NewRecorder()
+			application.routes().ServeHTTP(response, embeddedRequest(http.MethodGet, "/api/dashboard"))
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+			}
+			var result struct {
+				Data dashboardResponse `json:"data"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.Data.AllowReset != testCase.wantAllowReset {
+				t.Fatalf("allow_reset = %t, want %t", result.Data.AllowReset, testCase.wantAllowReset)
+			}
+		})
 	}
 }
 
@@ -134,7 +196,7 @@ func TestDashboardRejectsMismatchedUserIDBeforeAdminLookup(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	application := newApp(testConfig(t, upstream.URL, false))
+	application := newApp(testConfig(t, upstream.URL))
 	request := embeddedRequest(http.MethodGet, "/api/dashboard")
 	request.Header.Set(embeddedUserIDHeader, "3")
 	response := httptest.NewRecorder()
@@ -154,7 +216,7 @@ func TestDashboardRejectsInvalidToken(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	application := newApp(testConfig(t, upstream.URL, false))
+	application := newApp(testConfig(t, upstream.URL))
 	response := httptest.NewRecorder()
 	application.routes().ServeHTTP(response, embeddedRequest(http.MethodGet, "/api/dashboard"))
 	if response.Code != http.StatusUnauthorized {
@@ -162,17 +224,17 @@ func TestDashboardRejectsInvalidToken(t *testing.T) {
 	}
 }
 
-func TestResetRequiresSubscribedAccountAndServerPermission(t *testing.T) {
+func TestResetRequiresSubscribedAccountAndUserAttribute(t *testing.T) {
 	for _, testCase := range []struct {
-		name       string
-		allowReset bool
-		accountID  string
-		wantStatus int
-		wantReset  int32
+		name           string
+		attributeValue string
+		accountID      string
+		wantStatus     int
+		wantReset      int32
 	}{
-		{name: "disabled", allowReset: false, accountID: "14", wantStatus: http.StatusForbidden},
-		{name: "not subscribed", allowReset: true, accountID: "99", wantStatus: http.StatusForbidden},
-		{name: "enabled", allowReset: true, accountID: "14", wantStatus: http.StatusOK, wantReset: 1},
+		{name: "disabled", attributeValue: "false", accountID: "14", wantStatus: http.StatusForbidden},
+		{name: "not subscribed", attributeValue: "true", accountID: "99", wantStatus: http.StatusForbidden},
+		{name: "enabled", attributeValue: "true", accountID: "14", wantStatus: http.StatusOK, wantReset: 1},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			var resetCalls atomic.Int32
@@ -184,6 +246,10 @@ func TestResetRequiresSubscribedAccountAndServerPermission(t *testing.T) {
 					writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":[{"id":1,"user_id":2,"group_id":9,"status":"active","group":{"id":9,"name":"test","platform":"openai","status":"active"}}]}`)
 				case "/api/v1/admin/accounts":
 					writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":{"items":[{"id":14,"name":"account","platform":"openai","type":"oauth","status":"active"}],"total":1,"page":1,"page_size":100,"pages":1}}`)
+				case "/api/v1/admin/user-attributes":
+					writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":[{"id":7,"key":"allow_reset","enabled":true}]}`)
+				case "/api/v1/admin/users/2/attributes":
+					writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":[{"attribute_id":7,"value":"`+testCase.attributeValue+`"}]}`)
 				case "/api/v1/admin/openai/accounts/14/reset-quota":
 					resetCalls.Add(1)
 					writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":{"windows_reset":2}}`)
@@ -193,7 +259,7 @@ func TestResetRequiresSubscribedAccountAndServerPermission(t *testing.T) {
 			}))
 			defer upstream.Close()
 
-			application := newApp(testConfig(t, upstream.URL, testCase.allowReset))
+			application := newApp(testConfig(t, upstream.URL))
 			response := httptest.NewRecorder()
 			application.routes().ServeHTTP(response, embeddedRequest(http.MethodPost, "/api/accounts/"+testCase.accountID+"/reset"))
 			if response.Code != testCase.wantStatus {
@@ -207,7 +273,7 @@ func TestResetRequiresSubscribedAccountAndServerPermission(t *testing.T) {
 }
 
 func TestPageAllowsConfiguredFrameAncestor(t *testing.T) {
-	application := newApp(testConfig(t, "https://sub2api.example", false))
+	application := newApp(testConfig(t, "https://sub2api.example"))
 	response := httptest.NewRecorder()
 	application.routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	if response.Code != http.StatusOK {
@@ -254,7 +320,7 @@ func TestNormalizeFrameAncestors(t *testing.T) {
 }
 
 func TestHealth(t *testing.T) {
-	application := newApp(testConfig(t, "https://sub2api.example", false))
+	application := newApp(testConfig(t, "https://sub2api.example"))
 	response := httptest.NewRecorder()
 	application.routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"ok"`) {
@@ -269,7 +335,7 @@ func TestSub2APIClientDoesNotFollowRedirect(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	application := newApp(testConfig(t, upstream.URL, false))
+	application := newApp(testConfig(t, upstream.URL))
 	response := httptest.NewRecorder()
 	application.routes().ServeHTTP(response, embeddedRequest(http.MethodGet, "/api/dashboard"))
 	if response.Code != http.StatusBadGateway {

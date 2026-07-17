@@ -15,9 +15,10 @@ import (
 )
 
 const (
-	embeddedUserIDHeader = "X-Sub2API-User-ID"
-	accountsPageSize     = 100
-	usageConcurrency     = 4
+	embeddedUserIDHeader   = "X-Sub2API-User-ID"
+	allowResetAttributeKey = "allow_reset"
+	accountsPageSize       = 100
+	usageConcurrency       = 4
 )
 
 var errSub2APIUnauthorized = errors.New("Sub2API user token is unauthorized")
@@ -55,6 +56,17 @@ type upstreamEnvelope struct {
 
 type currentUser struct {
 	ID int64 `json:"id"`
+}
+
+type userAttributeDefinition struct {
+	ID      int64  `json:"id"`
+	Key     string `json:"key"`
+	Enabled bool   `json:"enabled"`
+}
+
+type userAttributeValue struct {
+	AttributeID int64  `json:"attribute_id"`
+	Value       string `json:"value"`
 }
 
 type subscriptionGroup struct {
@@ -143,6 +155,10 @@ func bearerToken(header string) (string, bool) {
 }
 
 func (a *app) loadDashboard(ctx context.Context, userID int64, active bool) (*dashboardResponse, *requestError) {
+	allowReset, requestErr := a.userCanReset(ctx, userID)
+	if requestErr != nil {
+		return nil, requestErr
+	}
 	groups, requestErr := a.loadSubscribedGroups(ctx, userID)
 	if requestErr != nil {
 		return nil, requestErr
@@ -155,7 +171,40 @@ func (a *app) loadDashboard(ctx context.Context, userID int64, active bool) (*da
 		groups[index].Accounts = accounts
 	}
 	a.loadAccountUsage(ctx, groups, active)
-	return &dashboardResponse{UserID: userID, AllowReset: a.config.allowReset, Groups: groups}, nil
+	return &dashboardResponse{UserID: userID, AllowReset: allowReset, Groups: groups}, nil
+}
+
+func (a *app) userCanReset(ctx context.Context, userID int64) (bool, *requestError) {
+	query := url.Values{"enabled": {"true"}}
+	var definitions []userAttributeDefinition
+	if upstreamErr := a.doAdminRequest(ctx, http.MethodGet, "/admin/user-attributes", query, &definitions); upstreamErr != nil {
+		return false, &requestError{Status: http.StatusBadGateway, Code: 502, Message: "无法读取用户自定义属性定义"}
+	}
+
+	var allowResetAttributeID int64
+	for _, definition := range definitions {
+		if definition.Enabled && definition.Key == allowResetAttributeKey {
+			allowResetAttributeID = definition.ID
+			break
+		}
+	}
+	if allowResetAttributeID <= 0 {
+		return false, nil
+	}
+
+	var values []userAttributeValue
+	path := "/admin/users/" + strconv.FormatInt(userID, 10) + "/attributes"
+	if upstreamErr := a.doAdminRequest(ctx, http.MethodGet, path, nil, &values); upstreamErr != nil {
+		return false, &requestError{Status: http.StatusBadGateway, Code: 502, Message: "无法读取用户自定义属性"}
+	}
+	for _, value := range values {
+		if value.AttributeID != allowResetAttributeID {
+			continue
+		}
+		allowed, err := strconv.ParseBool(strings.TrimSpace(value.Value))
+		return err == nil && allowed, nil
+	}
+	return false, nil
 }
 
 func (a *app) loadSubscribedGroups(ctx context.Context, userID int64) ([]dashboardGroup, *requestError) {
