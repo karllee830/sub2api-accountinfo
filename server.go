@@ -13,15 +13,17 @@ import (
 var webFiles embed.FS
 
 type app struct {
-	config     config
-	client     *http.Client
-	quotaCache *accountQuotaCache
+	config           config
+	client           *http.Client
+	quotaCache       *accountQuotaCache
+	resetCoordinator *accountResetCoordinator
 }
 
 func newApp(cfg config) *app {
 	return &app{
-		config:     cfg,
-		quotaCache: newAccountQuotaCache(),
+		config:           cfg,
+		quotaCache:       newAccountQuotaCache(),
+		resetCoordinator: newAccountResetCoordinator(),
 		client: &http.Client{
 			Timeout: cfg.requestTimeout,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {

@@ -292,6 +292,8 @@ func TestResetRequiresSubscribedAccountAndUserAttribute(t *testing.T) {
 					writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":[{"id":1,"user_id":2,"group_id":9,"status":"active","group":{"id":9,"name":"test","platform":"openai","status":"active"}}]}`)
 				case "/api/v1/admin/accounts":
 					writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":{"items":[{"id":14,"name":"account","platform":"openai","type":"oauth","status":"active"}],"total":1,"page":1,"page_size":100,"pages":1}}`)
+				case "/api/v1/admin/accounts/14":
+					writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":{"id":14,"platform":"openai","type":"oauth","status":"active","credentials":{"chatgpt_account_id":"org-14"}}}`)
 				case "/api/v1/admin/user-attributes":
 					attributeCalls.Add(1)
 					writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":[{"id":7,"key":"allow_reset","enabled":true}]}`)

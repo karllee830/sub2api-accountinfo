@@ -130,6 +130,13 @@ func (a *app) queryOpenAIQuota(ctx context.Context, accountID int64, out any) *u
 	return nil
 }
 
+func (a *app) queryOpenAIQuotaFresh(ctx context.Context, accountID int64, out any) *upstreamAPIError {
+	if a.config.autoResetCredits {
+		a.quotaCache.invalidate(accountID)
+	}
+	return a.queryOpenAIQuota(ctx, accountID, out)
+}
+
 func (a *app) fetchOpenAIQuota(ctx context.Context, accountID int64) (json.RawMessage, *upstreamAPIError) {
 	var payload json.RawMessage
 	upstreamErr := a.doAdminRequest(
@@ -143,6 +150,29 @@ func (a *app) fetchOpenAIQuota(ctx context.Context, accountID int64) (json.RawMe
 }
 
 func (a *app) resetOpenAIQuota(ctx context.Context, accountID int64, out any) *upstreamAPIError {
+	account, upstreamErr := a.loadAutoResetAccount(ctx, accountID)
+	if upstreamErr != nil {
+		return upstreamErr
+	}
+	if account.ID != accountID {
+		return &upstreamAPIError{
+			Status:  http.StatusBadGateway,
+			Code:    "SUB2API_ACCOUNT_MISMATCH",
+			Message: "Sub2API 返回的账号信息不匹配",
+		}
+	}
+
+	upstreamErr = a.resetCoordinator.withIdentity(autoResetAccountIdentity(account), func(state *accountResetState) *upstreamAPIError {
+		if recentErr := a.resetCoordinator.beginAttempt(state); recentErr != nil {
+			return recentErr
+		}
+		defer a.resetCoordinator.finishAttempt(state)
+		return a.performOpenAIQuotaReset(ctx, accountID, out)
+	})
+	return upstreamErr
+}
+
+func (a *app) performOpenAIQuotaReset(ctx context.Context, accountID int64, out any) *upstreamAPIError {
 	upstreamErr := a.doAdminRequest(
 		ctx,
 		http.MethodPost,

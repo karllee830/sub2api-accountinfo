@@ -2,23 +2,27 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
 	autoResetLeadTime             = 10 * time.Minute
-	autoResetAccountScanInterval  = time.Hour
+	autoResetAccountScanInterval  = 15 * time.Minute
 	autoResetAccountScanRetry     = 30 * time.Minute
 	autoResetInitialQuerySpacing  = 30 * time.Second
 	autoResetQuotaRefreshInterval = 6 * time.Hour
 	autoResetQuotaRetryInterval   = 30 * time.Minute
-	autoResetPostResetCheck       = 15 * time.Minute
+	autoResetVerificationRetry    = 5 * time.Minute
+	autoResetPostResetCheck       = 2 * time.Minute
+	autoResetDueConcurrency       = 8
 )
 
 type autoResetCredit struct {
@@ -38,9 +42,30 @@ type autoResetResult struct {
 	WindowsReset int `json:"windows_reset"`
 }
 
+type autoResetAccount struct {
+	ID              int64          `json:"id"`
+	Platform        string         `json:"platform"`
+	Type            string         `json:"type"`
+	Status          string         `json:"status"`
+	ParentAccountID *int64         `json:"parent_account_id,omitempty"`
+	Credentials     map[string]any `json:"credentials,omitempty"`
+}
+
+type autoResetAccountPage struct {
+	Items []autoResetAccount `json:"items"`
+	Pages int                `json:"pages"`
+}
+
 type autoResetAccountState struct {
-	nextQuotaCheck time.Time
-	resetAt        time.Time
+	nextQuotaCheck         time.Time
+	resetAt                time.Time
+	expiresAt              time.Time
+	lastAttemptFingerprint string
+}
+
+type autoResetTask struct {
+	accountID int64
+	state     *autoResetAccountState
 }
 
 type autoResetWorker struct {
@@ -103,19 +128,52 @@ func (worker *autoResetWorker) step(ctx context.Context, now time.Time) time.Tim
 		return accountIDs[left] < accountIDs[right]
 	})
 
+	dueResets := make([]autoResetTask, 0)
+	dueRefreshes := make([]autoResetTask, 0)
 	for _, accountID := range accountIDs {
-		if ctx.Err() != nil {
-			break
-		}
 		state := worker.accounts[accountID]
 		switch {
 		case !state.resetAt.IsZero() && !now.Before(state.resetAt):
-			worker.consumeExpiringCredit(ctx, accountID, state, now)
+			dueResets = append(dueResets, autoResetTask{accountID: accountID, state: state})
 		case state.nextQuotaCheck.IsZero() || !now.Before(state.nextQuotaCheck):
-			worker.refreshQuota(ctx, accountID, state, now)
+			dueRefreshes = append(dueRefreshes, autoResetTask{accountID: accountID, state: state})
+		}
+	}
+
+	worker.consumeDueCredits(ctx, dueResets)
+	for _, task := range dueRefreshes {
+		if ctx.Err() != nil {
+			break
+		}
+		worker.refreshQuota(ctx, task.accountID, task.state, worker.now())
+		if !task.state.resetAt.IsZero() && !worker.now().Before(task.state.resetAt) {
+			worker.consumeExpiringCredit(ctx, task.accountID, task.state)
 		}
 	}
 	return worker.nextWake(now)
+}
+
+func (worker *autoResetWorker) consumeDueCredits(ctx context.Context, tasks []autoResetTask) {
+	if len(tasks) == 0 {
+		return
+	}
+	semaphore := make(chan struct{}, autoResetDueConcurrency)
+	var waitGroup sync.WaitGroup
+	for _, task := range tasks {
+		task := task
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			select {
+			case semaphore <- struct{}{}:
+				defer func() { <-semaphore }()
+			case <-ctx.Done():
+				return
+			}
+			worker.consumeExpiringCredit(ctx, task.accountID, task.state)
+		}()
+	}
+	waitGroup.Wait()
 }
 
 func (worker *autoResetWorker) discoverAccounts(ctx context.Context, now time.Time) {
@@ -127,19 +185,22 @@ func (worker *autoResetWorker) discoverAccounts(ctx context.Context, now time.Ti
 	}
 
 	seen := make(map[int64]struct{}, len(accounts))
+	seenOpenAIAccounts := make(map[string]struct{}, len(accounts))
 	newAccountIndex := 0
 	for _, account := range accounts {
-		if account.ID <= 0 ||
-			account.Platform != "openai" ||
-			account.Type != "oauth" ||
-			account.Status != "active" ||
-			account.ParentAccountID != nil {
+		if !isAutoResetAccountEligible(account) {
 			continue
 		}
+		identity := autoResetAccountIdentity(account)
+		if _, duplicate := seenOpenAIAccounts[identity]; duplicate {
+			continue
+		}
+		seenOpenAIAccounts[identity] = struct{}{}
 		seen[account.ID] = struct{}{}
 		if _, exists := worker.accounts[account.ID]; !exists {
+			batchIndex := newAccountIndex / autoResetDueConcurrency
 			worker.accounts[account.ID] = &autoResetAccountState{
-				nextQuotaCheck: now.Add(time.Duration(newAccountIndex) * autoResetInitialQuerySpacing),
+				nextQuotaCheck: now.Add(time.Duration(batchIndex) * autoResetInitialQuerySpacing),
 			}
 			newAccountIndex++
 		}
@@ -172,41 +233,131 @@ func (worker *autoResetWorker) consumeExpiringCredit(
 	ctx context.Context,
 	accountID int64,
 	state *autoResetAccountState,
-	now time.Time,
 ) {
-	var quota autoResetQuota
-	if upstreamErr := worker.app.queryOpenAIQuota(ctx, accountID, &quota); upstreamErr != nil {
-		log.Printf("automatic reset quota verification failed for account %d: %v", accountID, upstreamErr)
-		state.resetAt = time.Time{}
-		state.nextQuotaCheck = now.Add(autoResetQuotaRetryInterval)
+	scheduledExpiresAt := state.expiresAt
+	account, accountErr := worker.app.loadAutoResetAccount(ctx, accountID)
+	checkedAt := worker.now()
+	if accountErr != nil {
+		log.Printf("automatic reset account verification failed for account %d: %v", accountID, accountErr)
+		worker.scheduleVerificationRetry(state, scheduledExpiresAt, checkedAt)
+		return
+	}
+	if account.ID != accountID || !isAutoResetAccountEligible(account) {
+		clearAutoResetTarget(state)
+		state.nextQuotaCheck = checkedAt.Add(autoResetQuotaRefreshInterval)
+		log.Printf("automatic reset skipped account %d because it is no longer an active OpenAI OAuth parent account", accountID)
 		return
 	}
 
-	expiresAt, exists := earliestFutureCreditExpiry(quota, now)
-	if !exists || expiresAt.After(now.Add(autoResetLeadTime)) {
+	var quota autoResetQuota
+	var quotaErr *upstreamAPIError
+	var resetErr *upstreamAPIError
+	var resetResult autoResetResult
+	var currentExpiresAt time.Time
+	var duplicateSnapshot bool
+	var resetAttempted bool
+
+	coordinatorErr := worker.app.resetCoordinator.withIdentity(
+		autoResetAccountIdentity(account),
+		func(resetState *accountResetState) *upstreamAPIError {
+			quotaErr = worker.app.queryOpenAIQuotaFresh(ctx, accountID, &quota)
+			checkedAt = worker.now()
+			if quotaErr != nil {
+				return nil
+			}
+
+			var exists bool
+			currentExpiresAt, exists = earliestFutureCreditExpiry(quota, checkedAt)
+			if !exists || currentExpiresAt.After(checkedAt.Add(autoResetLeadTime)) {
+				return nil
+			}
+
+			fingerprint := resetCreditSnapshotFingerprint(quota, checkedAt)
+			if state.lastAttemptFingerprint == fingerprint {
+				duplicateSnapshot = true
+				return nil
+			}
+			if recentErr := worker.app.resetCoordinator.beginAttempt(resetState); recentErr != nil {
+				return recentErr
+			}
+			defer worker.app.resetCoordinator.finishAttempt(resetState)
+
+			state.lastAttemptFingerprint = fingerprint
+			resetAttempted = true
+			resetErr = worker.app.performOpenAIQuotaReset(ctx, accountID, &resetResult)
+			return nil
+		},
+	)
+	now := checkedAt
+	if now.IsZero() {
+		now = worker.now()
+	}
+
+	if quotaErr != nil {
+		log.Printf("automatic reset quota verification failed for account %d: %v", accountID, quotaErr)
+		worker.scheduleVerificationRetry(state, scheduledExpiresAt, now)
+		return
+	}
+
+	if duplicateSnapshot {
+		clearAutoResetTarget(state)
+		state.nextQuotaCheck = now.Add(autoResetPostResetCheck)
+		log.Printf(
+			"automatic reset skipped duplicate quota snapshot for account %d before credit expiry %s",
+			accountID,
+			currentExpiresAt.Format(time.RFC3339),
+		)
+		return
+	}
+
+	if coordinatorErr != nil {
+		clearAutoResetTarget(state)
+		state.nextQuotaCheck = now.Add(autoResetPostResetCheck)
+		log.Printf(
+			"automatic reset deferred for account %d after another recent reset attempt: %v",
+			accountID,
+			coordinatorErr,
+		)
+		return
+	}
+
+	if !resetAttempted {
 		worker.applyQuotaSchedule(state, quota, now)
 		return
 	}
 
-	state.resetAt = time.Time{}
-	state.nextQuotaCheck = now.Add(autoResetQuotaRetryInterval)
-	var result autoResetResult
-	if upstreamErr := worker.app.resetOpenAIQuota(ctx, accountID, &result); upstreamErr != nil {
+	clearAutoResetTarget(state)
+	state.nextQuotaCheck = now.Add(autoResetPostResetCheck)
+	if resetErr != nil {
 		log.Printf(
 			"automatic reset failed for account %d before credit expiry %s: %v",
 			accountID,
-			expiresAt.Format(time.RFC3339),
-			upstreamErr,
+			currentExpiresAt.Format(time.RFC3339),
+			resetErr,
 		)
 		return
 	}
-	state.nextQuotaCheck = now.Add(autoResetPostResetCheck)
 	log.Printf(
 		"automatic reset succeeded for account %d before credit expiry %s: windows_reset=%d",
 		accountID,
-		expiresAt.Format(time.RFC3339),
-		result.WindowsReset,
+		currentExpiresAt.Format(time.RFC3339),
+		resetResult.WindowsReset,
 	)
+}
+
+func (worker *autoResetWorker) scheduleVerificationRetry(
+	state *autoResetAccountState,
+	scheduledExpiresAt time.Time,
+	now time.Time,
+) {
+	retryAt := now.Add(autoResetVerificationRetry)
+	if scheduledExpiresAt.After(retryAt) {
+		state.resetAt = retryAt
+		state.nextQuotaCheck = now.Add(autoResetQuotaRefreshInterval)
+		return
+	}
+	clearAutoResetTarget(state)
+	state.nextQuotaCheck = now.Add(autoResetQuotaRetryInterval)
 }
 
 func (worker *autoResetWorker) applyQuotaSchedule(
@@ -217,7 +368,7 @@ func (worker *autoResetWorker) applyQuotaSchedule(
 	state.nextQuotaCheck = now.Add(autoResetQuotaRefreshInterval)
 	expiresAt, exists := earliestFutureCreditExpiry(quota, now)
 	if !exists {
-		state.resetAt = time.Time{}
+		clearAutoResetTarget(state)
 		return
 	}
 
@@ -226,6 +377,12 @@ func (worker *autoResetWorker) applyQuotaSchedule(
 		resetAt = now
 	}
 	state.resetAt = resetAt
+	state.expiresAt = expiresAt
+}
+
+func clearAutoResetTarget(state *autoResetAccountState) {
+	state.resetAt = time.Time{}
+	state.expiresAt = time.Time{}
 }
 
 func (worker *autoResetWorker) nextWake(now time.Time) time.Time {
@@ -269,8 +426,26 @@ func earliestFutureCreditExpiry(quota autoResetQuota, now time.Time) (time.Time,
 	return earliest, !earliest.IsZero()
 }
 
-func (a *app) listAutoResetAccounts(ctx context.Context) ([]accountView, *upstreamAPIError) {
-	accounts := make([]accountView, 0)
+func resetCreditSnapshotFingerprint(quota autoResetQuota, now time.Time) string {
+	credits := quota.RateLimitResetCredits
+	if credits == nil {
+		return "0"
+	}
+
+	expirations := make([]string, 0, len(credits.Credits))
+	for _, credit := range credits.Credits {
+		expiresAt, err := time.Parse(time.RFC3339, strings.TrimSpace(credit.ExpiresAt))
+		if err != nil || !expiresAt.After(now) {
+			continue
+		}
+		expirations = append(expirations, expiresAt.UTC().Format(time.RFC3339Nano))
+	}
+	sort.Strings(expirations)
+	return fmt.Sprintf("%d|%s", credits.AvailableCount, strings.Join(expirations, ","))
+}
+
+func (a *app) listAutoResetAccounts(ctx context.Context) ([]autoResetAccount, *upstreamAPIError) {
+	accounts := make([]autoResetAccount, 0)
 	for page := 1; ; page++ {
 		query := url.Values{
 			"page":       {strconv.Itoa(page)},
@@ -282,7 +457,7 @@ func (a *app) listAutoResetAccounts(ctx context.Context) ([]accountView, *upstre
 			"sort_order": {"asc"},
 			"lite":       {"true"},
 		}
-		var result accountPage
+		var result autoResetAccountPage
 		if upstreamErr := a.doAdminRequest(ctx, http.MethodGet, "/admin/accounts", query, &result); upstreamErr != nil {
 			return nil, upstreamErr
 		}
@@ -292,4 +467,37 @@ func (a *app) listAutoResetAccounts(ctx context.Context) ([]accountView, *upstre
 		}
 	}
 	return accounts, nil
+}
+
+func (a *app) loadAutoResetAccount(ctx context.Context, accountID int64) (autoResetAccount, *upstreamAPIError) {
+	var account autoResetAccount
+	if upstreamErr := a.doAdminRequest(
+		ctx,
+		http.MethodGet,
+		"/admin/accounts/"+strconv.FormatInt(accountID, 10),
+		nil,
+		&account,
+	); upstreamErr != nil {
+		return autoResetAccount{}, upstreamErr
+	}
+	return account, nil
+}
+
+func isAutoResetAccountEligible(account autoResetAccount) bool {
+	return account.ID > 0 &&
+		account.Platform == "openai" &&
+		account.Type == "oauth" &&
+		account.Status == "active" &&
+		account.ParentAccountID == nil
+}
+
+func autoResetAccountIdentity(account autoResetAccount) string {
+	for _, key := range []string{"chatgpt_account_id", "organization_id"} {
+		if value, ok := account.Credentials[key].(string); ok {
+			if identity := strings.TrimSpace(value); identity != "" {
+				return "openai:" + identity
+			}
+		}
+	}
+	return "sub2api:" + strconv.FormatInt(account.ID, 10)
 }
