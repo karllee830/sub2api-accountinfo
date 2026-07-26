@@ -18,6 +18,11 @@ func main() {
 	}
 
 	application := newApp(cfg)
+	workerContext, stopWorkers := context.WithCancel(context.Background())
+	defer stopWorkers()
+	if cfg.autoResetCredits {
+		go application.runAutoResetCredits(workerContext)
+	}
 	server := &http.Server{
 		Addr:              cfg.listenAddr,
 		Handler:           application.routes(),
@@ -29,6 +34,7 @@ func main() {
 	signal.Notify(shutdownSignals, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-shutdownSignals
+		stopWorkers()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := server.Shutdown(ctx); err != nil {

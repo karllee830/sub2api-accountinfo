@@ -19,6 +19,7 @@ type config struct {
 	sub2APIURL        *url.URL
 	adminAPIKey       string
 	allowReset        bool
+	autoResetCredits  bool
 	trustProxyHeaders bool
 	frameAncestors    string
 	listenAddr        string
@@ -40,6 +41,10 @@ func loadConfig() (config, error) {
 	if err != nil {
 		return config{}, err
 	}
+	autoResetCredits, err := parseBoolEnv("AUTO_RESET_CREDITS", false)
+	if err != nil {
+		return config{}, err
+	}
 	trustProxyHeaders, err := parseBoolEnv("TRUST_PROXY_HEADERS", true)
 	if err != nil {
 		return config{}, err
@@ -58,6 +63,7 @@ func loadConfig() (config, error) {
 		sub2APIURL:        sub2APIURL,
 		adminAPIKey:       adminAPIKey,
 		allowReset:        allowReset,
+		autoResetCredits:  autoResetCredits,
 		trustProxyHeaders: trustProxyHeaders,
 		frameAncestors:    frameAncestors,
 		listenAddr:        listenAddr,

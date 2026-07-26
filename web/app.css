@@ -201,6 +201,43 @@ h3 {
   background: var(--success-soft);
 }
 
+.auto-reset-banner {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 13px 14px;
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  border-radius: 13px;
+  color: var(--primary-text);
+  background: var(--primary-soft);
+}
+
+.auto-reset-banner-icon {
+  display: inline-grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border-radius: 11px;
+  color: #ffffff;
+  background: var(--primary);
+  font-size: 20px;
+  font-weight: 800;
+}
+
+.auto-reset-banner strong {
+  display: block;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.auto-reset-banner p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
 .error-panel {
   color: var(--danger-text);
   background: var(--danger-soft);

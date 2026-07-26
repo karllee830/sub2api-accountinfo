@@ -87,15 +87,16 @@ type userSubscription struct {
 }
 
 type accountView struct {
-	ID          int64           `json:"id"`
-	Name        string          `json:"name"`
-	Platform    string          `json:"platform"`
-	Type        string          `json:"type"`
-	Status      string          `json:"status"`
-	Schedulable bool            `json:"schedulable"`
-	GroupIDs    []int64         `json:"group_ids,omitempty"`
-	Usage       json.RawMessage `json:"usage,omitempty"`
-	UsageError  string          `json:"usage_error,omitempty"`
+	ID              int64           `json:"id"`
+	Name            string          `json:"name"`
+	Platform        string          `json:"platform"`
+	Type            string          `json:"type"`
+	Status          string          `json:"status"`
+	Schedulable     bool            `json:"schedulable"`
+	ParentAccountID *int64          `json:"parent_account_id,omitempty"`
+	GroupIDs        []int64         `json:"group_ids,omitempty"`
+	Usage           json.RawMessage `json:"usage,omitempty"`
+	UsageError      string          `json:"usage_error,omitempty"`
 }
 
 type accountPage struct {
@@ -118,9 +119,10 @@ type dashboardGroup struct {
 }
 
 type dashboardResponse struct {
-	UserID     int64            `json:"user_id"`
-	AllowReset bool             `json:"allow_reset"`
-	Groups     []dashboardGroup `json:"groups"`
+	UserID           int64            `json:"user_id"`
+	AllowReset       bool             `json:"allow_reset"`
+	AutoResetCredits bool             `json:"auto_reset_credits"`
+	Groups           []dashboardGroup `json:"groups"`
 }
 
 func (a *app) authenticateUser(request *http.Request) (int64, *requestError) {
@@ -171,7 +173,12 @@ func (a *app) loadDashboard(ctx context.Context, userID int64, active bool) (*da
 		groups[index].Accounts = accounts
 	}
 	a.loadAccountUsage(ctx, groups, active)
-	return &dashboardResponse{UserID: userID, AllowReset: allowReset, Groups: groups}, nil
+	return &dashboardResponse{
+		UserID:           userID,
+		AllowReset:       allowReset,
+		AutoResetCredits: a.config.autoResetCredits,
+		Groups:           groups,
+	}, nil
 }
 
 func (a *app) userCanReset(ctx context.Context, userID int64) (bool, *requestError) {

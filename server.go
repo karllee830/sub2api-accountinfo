@@ -13,13 +13,15 @@ import (
 var webFiles embed.FS
 
 type app struct {
-	config config
-	client *http.Client
+	config     config
+	client     *http.Client
+	quotaCache *accountQuotaCache
 }
 
 func newApp(cfg config) *app {
 	return &app{
-		config: cfg,
+		config:     cfg,
+		quotaCache: newAccountQuotaCache(),
 		client: &http.Client{
 			Timeout: cfg.requestTimeout,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
@@ -133,7 +135,7 @@ func (a *app) handleAccountAPI(response http.ResponseWriter, request *http.Reque
 			return
 		}
 		var data json.RawMessage
-		if upstreamErr := a.doAdminRequest(request.Context(), http.MethodGet, "/admin/openai/accounts/"+strconv.FormatInt(accountID, 10)+"/quota", nil, &data); upstreamErr != nil {
+		if upstreamErr := a.queryOpenAIQuota(request.Context(), accountID, &data); upstreamErr != nil {
 			writeUpstreamError(response, upstreamErr)
 			return
 		}
@@ -153,7 +155,7 @@ func (a *app) handleAccountAPI(response http.ResponseWriter, request *http.Reque
 			return
 		}
 		var data json.RawMessage
-		if upstreamErr := a.doAdminRequest(request.Context(), http.MethodPost, "/admin/openai/accounts/"+strconv.FormatInt(accountID, 10)+"/reset-quota", nil, &data); upstreamErr != nil {
+		if upstreamErr := a.resetOpenAIQuota(request.Context(), accountID, &data); upstreamErr != nil {
 			writeUpstreamError(response, upstreamErr)
 			return
 		}

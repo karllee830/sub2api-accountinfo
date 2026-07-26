@@ -191,6 +191,7 @@ func TestDashboardAllowResetConfigBypassesUserAttributes(t *testing.T) {
 
 	cfg := testConfig(t, upstream.URL)
 	cfg.allowReset = true
+	cfg.autoResetCredits = true
 	application := newApp(cfg)
 	response := httptest.NewRecorder()
 	application.routes().ServeHTTP(response, embeddedRequest(http.MethodGet, "/api/dashboard"))
@@ -205,6 +206,9 @@ func TestDashboardAllowResetConfigBypassesUserAttributes(t *testing.T) {
 	}
 	if !result.Data.AllowReset {
 		t.Fatal("ALLOW_RESET=true must allow resets")
+	}
+	if !result.Data.AutoResetCredits {
+		t.Fatal("AUTO_RESET_CREDITS=true must be exposed to the frontend")
 	}
 	if attributeCalls.Load() != 0 {
 		t.Fatalf("user attribute calls = %d, want 0", attributeCalls.Load())
@@ -376,6 +380,23 @@ func TestQuotaPanelShowsEveryCreditExpiration(t *testing.T) {
 	} {
 		if !strings.Contains(content, text) {
 			t.Fatalf("quota panel is missing %q", text)
+		}
+	}
+}
+
+func TestAutoResetEnabledBanner(t *testing.T) {
+	script, err := webFiles.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(script)
+	for _, text := range []string{
+		"data.auto_reset_credits",
+		"自动重置已开启",
+		"重置额度到期前 10 分钟自动使用",
+	} {
+		if !strings.Contains(content, text) {
+			t.Fatalf("auto reset banner is missing %q", text)
 		}
 	}
 }

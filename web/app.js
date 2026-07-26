@@ -582,9 +582,30 @@
     return card
   }
 
+  function renderAutoResetBanner() {
+    const banner = document.createElement('aside')
+    banner.className = 'auto-reset-banner'
+    banner.setAttribute('role', 'status')
+    const icon = document.createElement('span')
+    icon.className = 'auto-reset-banner-icon'
+    icon.setAttribute('aria-hidden', 'true')
+    icon.textContent = '◷'
+    const copy = document.createElement('div')
+    const title = document.createElement('strong')
+    title.textContent = '自动重置已开启'
+    const description = document.createElement('p')
+    description.textContent = '系统会在重置额度到期前 10 分钟自动使用。'
+    copy.append(title, description)
+    banner.append(icon, copy)
+    return banner
+  }
+
   function renderDashboard(data) {
     elements.userBadge.textContent = `用户 #${data.user_id}`
     elements.content.replaceChildren()
+    if (data.auto_reset_credits) {
+      elements.content.append(renderAutoResetBanner())
+    }
 
     if (!Array.isArray(data.groups) || data.groups.length === 0) {
       const empty = document.createElement('div')
