@@ -140,4 +140,6 @@ node --check web/app.js
 - 推送 `v1.2.3` 格式的 Git 标签：发布 `1.2.3`、`1.2`、`1` 和 `sha-*` 标签；
 - 也可在 GitHub Actions 页面手动运行。
 
+为兼容尚未实现 OCI referrers API 的 Registry V2 镜像加速器，发布流程会显式关闭 provenance 和 SBOM attestation。合并后还会校验镜像索引只能包含 `linux/amd64` 与 `linux/arm64`，防止再次生成 `unknown/unknown` attestation manifest。
+
 镜像地址分别为 `ghcr.io/karllee830/sub2api-accountinfo` 和 `docker.io/karllee830/sub2api-accountinfo`。GHCR 使用仓库自动提供的 `GITHUB_TOKEN`；Docker Hub 需要仓库 Secret `DOCKERHUB_USERNAME` 和 `DOCKERHUB_TOKEN`。
