@@ -451,6 +451,9 @@ func TestUsageWindowStatsUseChineseLabelsAndBudgetEstimate(t *testing.T) {
 		"推算总额度 $${formatMoney(budget.total)}",
 		"推算剩余 $${formatMoney(budget.remaining)}",
 		"const total = spent / (utilization / 100)",
+		"usage?.utilization_pending_confirmation === true",
+		"OpenAI 暂时返回 0%，等待确认",
+		"valueNode.textContent = displayUtilization.isPending ? '复核中'",
 	} {
 		if !strings.Contains(content, text) {
 			t.Fatalf("usage window display rule is missing %q", text)

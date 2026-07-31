@@ -88,3 +88,86 @@ func TestEnrichAccountUsageKeepsProviderUsageWhenLogRequestFails(t *testing.T) {
 		t.Fatal("user window stats must be omitted when usage logs fail")
 	}
 }
+
+func TestUsageZeroRequiresSeparatedConfirmation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage-window-state.json")
+	store := newUsageWindowStateStore(path)
+	start := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	resetAt := start.Add(2 * time.Hour)
+	definition := usageWindowDefinitions[0]
+
+	observe := func(at time.Time, utilization float64) bool {
+		t.Helper()
+		_, pending, ok := store.resolveObserved(14, definition, resetAt, time.Time{}, at, utilization, true)
+		if !ok {
+			t.Fatal("resolveObserved() returned false")
+		}
+		return pending
+	}
+
+	if observe(start, 25) {
+		t.Fatal("initial non-zero utilization must not be pending")
+	}
+	firstZeroAt := start.Add(time.Minute)
+	if !observe(firstZeroAt, 0) {
+		t.Fatal("first unexpected zero must be pending")
+	}
+
+	store = newUsageWindowStateStore(path)
+	if !observe(firstZeroAt.Add(usageZeroConfirmationDelay-time.Second), 0) {
+		t.Fatal("zero before the confirmation delay must remain pending after reload")
+	}
+	if observe(firstZeroAt.Add(usageZeroConfirmationDelay), 0) {
+		t.Fatal("separated zero confirmation must be accepted")
+	}
+
+	state := store.entries["14:5h"]
+	if state.LastUtilization == nil || *state.LastUtilization != 0 {
+		t.Fatalf("confirmed utilization = %v, want 0", state.LastUtilization)
+	}
+	if state.PendingZeroSince != nil || state.PendingZeroResetAt != nil {
+		t.Fatalf("pending zero was not cleared: %#v", state)
+	}
+}
+
+func TestUsageZeroRecoveryAndKnownResetClearPendingState(t *testing.T) {
+	store := newUsageWindowStateStore(filepath.Join(t.TempDir(), "usage-window-state.json"))
+	start := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	resetAt := start.Add(2 * time.Hour)
+	definition := usageWindowDefinitions[0]
+
+	if _, _, ok := store.resolveObserved(14, definition, resetAt, time.Time{}, start, 25, true); !ok {
+		t.Fatal("initial observation failed")
+	}
+	if _, pending, ok := store.resolveObserved(14, definition, resetAt, time.Time{}, start.Add(time.Minute), 0, true); !ok || !pending {
+		t.Fatalf("first zero pending = %t, ok = %t; want true, true", pending, ok)
+	}
+	if _, pending, ok := store.resolveObserved(14, definition, resetAt, time.Time{}, start.Add(2*time.Minute), 25, true); !ok || pending {
+		t.Fatalf("recovered value pending = %t, ok = %t; want false, true", pending, ok)
+	}
+
+	store.invalidateAccount(14)
+	if _, pending, ok := store.resolveObserved(14, definition, resetAt, time.Time{}, start.Add(3*time.Minute), 0, true); !ok || pending {
+		t.Fatalf("known reset zero pending = %t, ok = %t; want false, true", pending, ok)
+	}
+}
+
+func TestResolveAccountUsageWindowsMarksPendingZero(t *testing.T) {
+	application := &app{usageWindowState: newUsageWindowStateStore(filepath.Join(t.TempDir(), "usage-window-state.json"))}
+	start := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	resetAt := "2026-07-31T14:00:00Z"
+
+	application.resolveAccountUsageWindows(14, json.RawMessage(`{"five_hour":{"utilization":25,"resets_at":"`+resetAt+`"}}`), start)
+	payload, _, ok := application.resolveAccountUsageWindows(
+		14,
+		json.RawMessage(`{"five_hour":{"utilization":0,"resets_at":"`+resetAt+`"}}`),
+		start.Add(time.Minute),
+	)
+	if !ok {
+		t.Fatal("zero payload was not resolved")
+	}
+	progress, ok := payload["five_hour"].(map[string]any)
+	if !ok || progress[usageZeroPendingPayloadField] != true {
+		t.Fatalf("pending zero marker missing: %#v", payload["five_hour"])
+	}
+}

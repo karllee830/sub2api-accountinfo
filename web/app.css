@@ -401,6 +401,11 @@ h3 {
   background: var(--success-soft);
 }
 
+.stat-chip-warning {
+  color: var(--warning-text);
+  background: var(--warning-soft);
+}
+
 .usage-windows {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 18px;
@@ -431,6 +436,10 @@ h3 {
   overflow: hidden;
   border-radius: 999px;
   background: var(--track);
+}
+
+.progress-track.is-pending {
+  background: repeating-linear-gradient(135deg, var(--surface-muted) 0 6px, var(--border-strong) 6px 12px);
 }
 
 .progress-bar {
