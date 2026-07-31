@@ -283,6 +283,11 @@
     return `${restMinutes}分钟`
   }
 
+  function hasRenderableUsageWindow(usage) {
+    if (!usage || typeof usage !== 'object' || !usage.resets_at) return false
+    return Number.isFinite(new Date(usage.resets_at).getTime())
+  }
+
   function createChip(text, className = 'stat-chip') {
     const chip = document.createElement('span')
     chip.className = className
@@ -557,6 +562,11 @@
   }
 
   function renderAccount(account, allowReset) {
+    const renderableWindows = windowDefinitions.filter(([key]) => (
+      hasRenderableUsageWindow(account.usage?.[key])
+    ))
+    if (renderableWindows.length === 0) return null
+
     const card = document.createElement('article')
     card.className = 'account-card'
 
@@ -585,21 +595,12 @@
 
     const windows = document.createElement('div')
     windows.className = 'usage-windows'
-    let rendered = 0
-    for (const [key, label] of windowDefinitions) {
-      if (!account.usage?.[key]) continue
+    for (const [key, label] of renderableWindows) {
       windows.append(renderWindow(label, account.usage[key]))
-      rendered += 1
-    }
-    if (rendered === 0) {
-      const empty = document.createElement('div')
-      empty.className = 'empty-state'
-      empty.textContent = account.usage_error || account.usage?.error || '当前账号暂无可显示的用量窗口'
-      windows.append(empty)
     }
 
     card.append(header, meta, windows)
-    if (rendered > 0) renderAccountActions(card, account, allowReset)
+    renderAccountActions(card, account, allowReset)
     return card
   }
 
@@ -701,7 +702,19 @@
           empty.textContent = '该订阅分组尚未绑定账号'
           accounts.append(empty)
         } else {
-          for (const account of group.accounts) accounts.append(renderAccount(account, Boolean(data.allow_reset)))
+          let renderedAccounts = 0
+          for (const account of group.accounts) {
+            const accountCard = renderAccount(account, Boolean(data.allow_reset))
+            if (!accountCard) continue
+            accounts.append(accountCard)
+            renderedAccounts += 1
+          }
+          if (renderedAccounts === 0) {
+            const empty = document.createElement('div')
+            empty.className = 'empty-state'
+            empty.textContent = '该订阅分组暂无可显示的用量窗口'
+            accounts.append(empty)
+          }
         }
         section.append(header, accounts)
         elements.content.append(section)

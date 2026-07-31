@@ -394,10 +394,30 @@ func TestQuotaButtonOnlyTargetsOAuthAccountsWithUsageWindows(t *testing.T) {
 	content := string(script)
 	for _, text := range []string{
 		"account.platform !== 'openai' || account.type !== 'oauth'",
-		"if (rendered > 0) renderAccountActions(card, account, allowReset)",
+		"renderAccountActions(card, account, allowReset)",
 	} {
 		if !strings.Contains(content, text) {
 			t.Fatalf("quota button visibility rule is missing %q", text)
+		}
+	}
+}
+
+func TestAccountsWithoutRenderableUsageWindowsAreHidden(t *testing.T) {
+	script, err := webFiles.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(script)
+	for _, text := range []string{
+		"function hasRenderableUsageWindow(usage)",
+		"new Date(usage.resets_at).getTime()",
+		"const renderableWindows = windowDefinitions.filter",
+		"if (renderableWindows.length === 0) return null",
+		"const accountCard = renderAccount(account, Boolean(data.allow_reset))",
+		"该订阅分组暂无可显示的用量窗口",
+	} {
+		if !strings.Contains(content, text) {
+			t.Fatalf("usage window visibility rule is missing %q", text)
 		}
 	}
 }
