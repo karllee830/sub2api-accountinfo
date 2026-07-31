@@ -94,6 +94,10 @@ func TestAutoResetWorkerUsesCreditAtLeadTimeWithoutFrequentQuotaQueries(t *testi
 	if want := expiresAt.Add(-autoResetLeadTime); !state.resetAt.Equal(want) {
 		t.Fatalf("resetAt = %s, want %s", state.resetAt, want)
 	}
+	schedules := application.autoResetPlans.forAccounts(map[int64]struct{}{14: {}})
+	if len(schedules) != 1 || schedules[0].AccountID != 14 || !schedules[0].ResetAt.Equal(state.resetAt) || !schedules[0].ExpiresAt.Equal(state.expiresAt) {
+		t.Fatalf("published schedules = %#v, want account 14 at %s", schedules, state.resetAt)
+	}
 
 	currentTime = start.Add(20 * time.Minute)
 	worker.step(context.Background(), currentTime)
@@ -120,6 +124,20 @@ func TestAutoResetWorkerUsesCreditAtLeadTimeWithoutFrequentQuotaQueries(t *testi
 	worker.step(context.Background(), currentTime)
 	if quotaQueries.Load() != 4 || resets.Load() != 1 {
 		t.Fatalf("unchanged post-reset snapshot: quota=%d resets=%d", quotaQueries.Load(), resets.Load())
+	}
+}
+
+func TestAutoResetScheduleStoreFiltersAccounts(t *testing.T) {
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	store := newAutoResetScheduleStore()
+	store.replace([]autoResetSchedule{
+		{AccountID: 14, ResetAt: now.Add(20 * time.Minute), ExpiresAt: now.Add(30 * time.Minute)},
+		{AccountID: 16, ResetAt: now.Add(10 * time.Minute), ExpiresAt: now.Add(20 * time.Minute)},
+	})
+
+	schedules := store.forAccounts(map[int64]struct{}{16: {}})
+	if len(schedules) != 1 || schedules[0].AccountID != 16 {
+		t.Fatalf("visible schedules = %#v, want only account 16", schedules)
 	}
 }
 

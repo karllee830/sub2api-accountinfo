@@ -63,6 +63,50 @@ type autoResetAccountState struct {
 	lastAttemptFingerprint string
 }
 
+type autoResetSchedule struct {
+	AccountID int64     `json:"account_id"`
+	ResetAt   time.Time `json:"reset_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+type autoResetScheduleStore struct {
+	mutex     sync.RWMutex
+	schedules []autoResetSchedule
+}
+
+func newAutoResetScheduleStore() *autoResetScheduleStore {
+	return &autoResetScheduleStore{schedules: []autoResetSchedule{}}
+}
+
+func (store *autoResetScheduleStore) replace(schedules []autoResetSchedule) {
+	if store == nil {
+		return
+	}
+	copyOfSchedules := append([]autoResetSchedule(nil), schedules...)
+	sort.Slice(copyOfSchedules, func(left, right int) bool {
+		return copyOfSchedules[left].ResetAt.Before(copyOfSchedules[right].ResetAt) ||
+			(copyOfSchedules[left].ResetAt.Equal(copyOfSchedules[right].ResetAt) && copyOfSchedules[left].AccountID < copyOfSchedules[right].AccountID)
+	})
+	store.mutex.Lock()
+	store.schedules = copyOfSchedules
+	store.mutex.Unlock()
+}
+
+func (store *autoResetScheduleStore) forAccounts(accountIDs map[int64]struct{}) []autoResetSchedule {
+	if store == nil {
+		return []autoResetSchedule{}
+	}
+	store.mutex.RLock()
+	defer store.mutex.RUnlock()
+	schedules := make([]autoResetSchedule, 0, len(store.schedules))
+	for _, schedule := range store.schedules {
+		if _, visible := accountIDs[schedule.AccountID]; visible {
+			schedules = append(schedules, schedule)
+		}
+	}
+	return schedules
+}
+
 type autoResetTask struct {
 	accountID int64
 	state     *autoResetAccountState
@@ -85,6 +129,7 @@ func newAutoResetWorker(application *app) *autoResetWorker {
 
 func (a *app) runAutoResetCredits(ctx context.Context) {
 	worker := newAutoResetWorker(a)
+	defer a.autoResetPlans.replace(nil)
 	log.Printf(
 		"automatic reset credits enabled: account scan=%s quota refresh=%s cache=%s lead=%s",
 		autoResetAccountScanInterval,
@@ -150,7 +195,26 @@ func (worker *autoResetWorker) step(ctx context.Context, now time.Time) time.Tim
 			worker.consumeExpiringCredit(ctx, task.accountID, task.state)
 		}
 	}
+	worker.publishSchedule()
 	return worker.nextWake(now)
+}
+
+func (worker *autoResetWorker) publishSchedule() {
+	if worker.app == nil || worker.app.autoResetPlans == nil {
+		return
+	}
+	schedules := make([]autoResetSchedule, 0, len(worker.accounts))
+	for accountID, state := range worker.accounts {
+		if state == nil || state.resetAt.IsZero() {
+			continue
+		}
+		schedules = append(schedules, autoResetSchedule{
+			AccountID: accountID,
+			ResetAt:   state.resetAt,
+			ExpiresAt: state.expiresAt,
+		})
+	}
+	worker.app.autoResetPlans.replace(schedules)
 }
 
 func (worker *autoResetWorker) consumeDueCredits(ctx context.Context, tasks []autoResetTask) {

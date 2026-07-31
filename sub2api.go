@@ -119,10 +119,11 @@ type dashboardGroup struct {
 }
 
 type dashboardResponse struct {
-	UserID           int64            `json:"user_id"`
-	AllowReset       bool             `json:"allow_reset"`
-	AutoResetCredits bool             `json:"auto_reset_credits"`
-	Groups           []dashboardGroup `json:"groups"`
+	UserID             int64               `json:"user_id"`
+	AllowReset         bool                `json:"allow_reset"`
+	AutoResetCredits   bool                `json:"auto_reset_credits"`
+	AutoResetSchedules []autoResetSchedule `json:"auto_reset_schedules"`
+	Groups             []dashboardGroup    `json:"groups"`
 }
 
 func (a *app) authenticateUser(request *http.Request) (int64, *requestError) {
@@ -173,11 +174,18 @@ func (a *app) loadDashboard(ctx context.Context, userID int64, active bool) (*da
 		groups[index].Accounts = accounts
 	}
 	a.loadAccountUsage(ctx, groups, active)
+	accountIDs := make(map[int64]struct{})
+	for _, group := range groups {
+		for _, account := range group.Accounts {
+			accountIDs[account.ID] = struct{}{}
+		}
+	}
 	return &dashboardResponse{
-		UserID:           userID,
-		AllowReset:       allowReset,
-		AutoResetCredits: a.config.autoResetCredits,
-		Groups:           groups,
+		UserID:             userID,
+		AllowReset:         allowReset,
+		AutoResetCredits:   a.config.autoResetCredits,
+		AutoResetSchedules: a.autoResetPlans.forAccounts(accountIDs),
+		Groups:             groups,
 	}, nil
 }
 

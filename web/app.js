@@ -582,7 +582,7 @@
     return card
   }
 
-  function renderAutoResetBanner() {
+  function renderAutoResetBanner(schedules) {
     const banner = document.createElement('aside')
     banner.className = 'auto-reset-banner'
     banner.setAttribute('role', 'status')
@@ -595,7 +595,47 @@
     title.textContent = '自动重置已开启'
     const description = document.createElement('p')
     description.textContent = '系统会在重置额度到期前 10 分钟自动使用。'
-    copy.append(title, description)
+
+    const schedulePanel = document.createElement('div')
+    schedulePanel.className = 'auto-reset-schedule'
+    const scheduleTitle = document.createElement('strong')
+    scheduleTitle.className = 'auto-reset-schedule-title'
+    scheduleTitle.textContent = '已识别的自动重置时间'
+    schedulePanel.append(scheduleTitle)
+    if (Array.isArray(schedules) && schedules.length > 0) {
+      const scheduleList = document.createElement('ul')
+      scheduleList.className = 'auto-reset-schedule-list'
+      schedules.forEach((schedule) => {
+        const item = document.createElement('li')
+        item.className = 'auto-reset-schedule-item'
+        const account = document.createElement('span')
+        account.className = 'auto-reset-schedule-account'
+        account.textContent = `账号 #${schedule.account_id}`
+        const timing = document.createElement('div')
+        timing.className = 'auto-reset-schedule-timing'
+        const resetAt = document.createElement('time')
+        resetAt.textContent = `预计 ${formatFullDate(schedule.reset_at)} 执行`
+        if (schedule.reset_at) {
+          resetAt.dateTime = schedule.reset_at
+          resetAt.title = schedule.reset_at
+        }
+        const expiresAt = document.createElement('span')
+        expiresAt.textContent = schedule.expires_at
+          ? `额度 ${formatFullDate(schedule.expires_at)} 到期`
+          : '额度到期时间未提供'
+        timing.append(resetAt, expiresAt)
+        item.append(account, timing)
+        scheduleList.append(item)
+      })
+      schedulePanel.append(scheduleList)
+    } else {
+      const empty = document.createElement('p')
+      empty.className = 'auto-reset-schedule-empty'
+      empty.textContent = '当前暂未识别到会执行的自动重置，系统会继续扫描账号和额度。'
+      schedulePanel.append(empty)
+    }
+
+    copy.append(title, description, schedulePanel)
     banner.append(icon, copy)
     return banner
   }
@@ -604,7 +644,7 @@
     elements.userBadge.textContent = `用户 #${data.user_id}`
     elements.content.replaceChildren()
     if (data.auto_reset_credits) {
-      elements.content.append(renderAutoResetBanner())
+      elements.content.append(renderAutoResetBanner(data.auto_reset_schedules))
     }
 
     if (!Array.isArray(data.groups) || data.groups.length === 0) {

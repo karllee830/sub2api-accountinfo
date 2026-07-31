@@ -238,6 +238,68 @@ h3 {
   line-height: 1.55;
 }
 
+.auto-reset-schedule {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(99, 102, 241, 0.18);
+}
+
+.auto-reset-schedule-title {
+  color: var(--primary-text);
+  font-size: 11px;
+}
+
+.auto-reset-schedule-list {
+  display: grid;
+  gap: 6px;
+  margin: 7px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.auto-reset-schedule-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 7px 9px;
+  border: 1px solid rgba(99, 102, 241, 0.16);
+  border-radius: 9px;
+  background: var(--surface-solid);
+}
+
+.auto-reset-schedule-account {
+  color: var(--primary-text);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.auto-reset-schedule-timing {
+  display: grid;
+  justify-items: end;
+  min-width: 0;
+}
+
+.auto-reset-schedule-timing time {
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.4;
+  text-align: right;
+}
+
+.auto-reset-schedule-timing span,
+.auto-reset-schedule-empty {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.auto-reset-schedule-empty {
+  margin: 5px 0 0;
+}
+
 .error-panel {
   color: var(--danger-text);
   background: var(--danger-soft);

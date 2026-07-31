@@ -17,6 +17,7 @@ type app struct {
 	client           *http.Client
 	quotaCache       *accountQuotaCache
 	resetCoordinator *accountResetCoordinator
+	autoResetPlans   *autoResetScheduleStore
 }
 
 func newApp(cfg config) *app {
@@ -24,6 +25,7 @@ func newApp(cfg config) *app {
 		config:           cfg,
 		quotaCache:       newAccountQuotaCache(),
 		resetCoordinator: newAccountResetCoordinator(),
+		autoResetPlans:   newAutoResetScheduleStore(),
 		client: &http.Client{
 			Timeout: cfg.requestTimeout,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {

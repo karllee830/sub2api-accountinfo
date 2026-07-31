@@ -410,8 +410,11 @@ func TestAutoResetEnabledBanner(t *testing.T) {
 	content := string(script)
 	for _, text := range []string{
 		"data.auto_reset_credits",
+		"data.auto_reset_schedules",
 		"自动重置已开启",
 		"重置额度到期前 10 分钟自动使用",
+		"已识别的自动重置时间",
+		"当前暂未识别到会执行的自动重置",
 	} {
 		if !strings.Contains(content, text) {
 			t.Fatalf("auto reset banner is missing %q", text)
