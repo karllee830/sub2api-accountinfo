@@ -802,6 +802,10 @@
       elements.content.append(empty)
     } else {
       for (const group of data.groups) {
+        const sourceAccounts = Array.isArray(group.accounts) ? group.accounts : []
+        const renderedAccountCards = sourceAccounts
+          .map((account) => renderAccount(account, Boolean(data.allow_reset)))
+          .filter(Boolean)
         const section = document.createElement('section')
         section.className = 'group-section'
         const header = document.createElement('header')
@@ -816,31 +820,24 @@
         groupBadges.className = 'account-badges'
         groupBadges.append(
           createChip(group.platform || 'unknown', 'type-badge'),
-          createChip(`${group.accounts?.length || 0} 个账号`, 'type-badge type-badge-accent')
+          createChip(`${renderedAccountCards.length} 个账号`, 'type-badge type-badge-accent')
         )
         header.append(title, groupBadges)
 
         const accounts = document.createElement('div')
         accounts.className = 'account-list'
-        if (!Array.isArray(group.accounts) || group.accounts.length === 0) {
+        if (sourceAccounts.length === 0) {
           const empty = document.createElement('div')
           empty.className = 'empty-state'
           empty.textContent = '该订阅分组尚未绑定账号'
           accounts.append(empty)
+        } else if (renderedAccountCards.length === 0) {
+          const empty = document.createElement('div')
+          empty.className = 'empty-state'
+          empty.textContent = '该订阅分组暂无可显示的用量窗口'
+          accounts.append(empty)
         } else {
-          let renderedAccounts = 0
-          for (const account of group.accounts) {
-            const accountCard = renderAccount(account, Boolean(data.allow_reset))
-            if (!accountCard) continue
-            accounts.append(accountCard)
-            renderedAccounts += 1
-          }
-          if (renderedAccounts === 0) {
-            const empty = document.createElement('div')
-            empty.className = 'empty-state'
-            empty.textContent = '该订阅分组暂无可显示的用量窗口'
-            accounts.append(empty)
-          }
+          accounts.append(...renderedAccountCards)
         }
         section.append(header, accounts)
         elements.content.append(section)

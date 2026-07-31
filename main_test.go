@@ -434,7 +434,7 @@ func TestAccountsWithoutRenderableUsageWindowsAreHidden(t *testing.T) {
 		"new Date(usage.resets_at).getTime()",
 		"const renderableWindows = windowDefinitions.filter",
 		"if (renderableWindows.length === 0) return null",
-		"const accountCard = renderAccount(account, Boolean(data.allow_reset))",
+		".map((account) => renderAccount(account, Boolean(data.allow_reset)))",
 		"该订阅分组暂无可显示的用量窗口",
 	} {
 		if !strings.Contains(content, text) {
@@ -535,6 +535,26 @@ func TestDesktopLayoutUsesWideCompactCanvas(t *testing.T) {
 		if !strings.Contains(content, text) {
 			t.Fatalf("wide desktop layout is missing %q", text)
 		}
+	}
+}
+
+func TestGroupAccountCountUsesRenderedCards(t *testing.T) {
+	script, err := webFiles.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(script)
+	for _, text := range []string{
+		"const renderedAccountCards = sourceAccounts",
+		"`${renderedAccountCards.length} 个账号`",
+		"accounts.append(...renderedAccountCards)",
+	} {
+		if !strings.Contains(content, text) {
+			t.Fatalf("rendered account count rule is missing %q", text)
+		}
+	}
+	if strings.Contains(content, "`${group.accounts?.length || 0} 个账号`") {
+		t.Fatal("group badge still counts unrendered accounts")
 	}
 }
 
