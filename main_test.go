@@ -478,6 +478,37 @@ func TestUsageWindowStatsUseChineseLabelsAndBudgetEstimate(t *testing.T) {
 	}
 }
 
+func TestThemeUsesSolidWarmPalette(t *testing.T) {
+	stylesheet, err := webFiles.ReadFile("web/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(stylesheet)
+	for _, text := range []string{
+		"--primary: #b4532a",
+		"--primary: #e07a50",
+		"background: var(--page-bg);",
+		"background: var(--success-text);",
+		"background: var(--primary);",
+	} {
+		if !strings.Contains(content, text) {
+			t.Fatalf("warm solid theme is missing %q", text)
+		}
+	}
+	for _, forbidden := range []string{
+		"gradient(",
+		"backdrop-filter",
+		"#4f46e5",
+		"#818cf8",
+		"#6366f1",
+		"rgba(99, 102, 241",
+	} {
+		if strings.Contains(content, forbidden) {
+			t.Fatalf("warm solid theme still contains %q", forbidden)
+		}
+	}
+}
+
 func TestAutoResetEnabledBanner(t *testing.T) {
 	script, err := webFiles.ReadFile("web/app.js")
 	if err != nil {
