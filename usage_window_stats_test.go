@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -86,6 +87,127 @@ func TestEnrichAccountUsageKeepsProviderUsageWhenLogRequestFails(t *testing.T) {
 	}
 	if _, ok := progress["user_window_stats"]; ok {
 		t.Fatal("user window stats must be omitted when usage logs fail")
+	}
+	if progress[userStatsUnavailableField] != true {
+		t.Fatalf("missing unavailable marker: %#v", progress)
+	}
+}
+
+func TestFetchUserWindowStatsUsesAggregateAndOnlyStartDayBoundary(t *testing.T) {
+	var statsCalls, detailCalls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/v1/admin/usage/stats":
+			statsCalls++
+			query := request.URL.Query()
+			if query.Get("start_date") != "2026-07-30" || query.Get("end_date") != "2026-07-31" || query.Get("nocache") != "true" {
+				t.Fatalf("aggregate query = %q", request.URL.RawQuery)
+			}
+			writeUpstream(response, http.StatusOK, `{"code":0,"data":{"total_requests":10,"total_tokens":100,"total_actual_cost":5}}`)
+		case "/api/v1/admin/usage":
+			detailCalls++
+			query := request.URL.Query()
+			if query.Get("start_date") != "2026-07-29" || query.Get("end_date") != "2026-07-29" || query.Get("sort_order") != "desc" {
+				t.Fatalf("boundary query = %q", request.URL.RawQuery)
+			}
+			writeUpstream(response, http.StatusOK, `{"code":0,"data":{"items":[`+
+				`{"user_id":2,"input_tokens":10,"output_tokens":5,"cache_creation_tokens":2,"cache_read_tokens":3,"actual_cost":1.5,"created_at":"2026-07-29T19:00:00Z"},`+
+				`{"user_id":2,"input_tokens":100,"output_tokens":100,"actual_cost":9,"created_at":"2026-07-29T17:59:59Z"}`+
+				`],"page":1,"page_size":200,"pages":1}}`)
+		default:
+			t.Fatalf("unexpected upstream path: %s", request.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	application := newApp(testConfig(t, upstream.URL))
+	stats, upstreamErr := application.fetchUserWindowStats(
+		context.Background(),
+		2,
+		14,
+		time.Date(2026, 7, 29, 18, 0, 0, 0, time.UTC),
+		time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC),
+	)
+	if upstreamErr != nil {
+		t.Fatal(upstreamErr)
+	}
+	if stats.Requests != 11 || stats.Tokens != 120 || stats.Cost != 6.5 {
+		t.Fatalf("stats = %+v, want requests=11 tokens=120 cost=6.5", stats)
+	}
+	if statsCalls != 1 || detailCalls != 1 {
+		t.Fatalf("calls stats=%d detail=%d, want 1 and 1", statsCalls, detailCalls)
+	}
+}
+
+func TestFetchUserWindowStatsSubtractsShortPrefix(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/v1/admin/usage/stats":
+			query := request.URL.Query()
+			if query.Get("start_date") != "2026-07-29" || query.Get("end_date") != "2026-07-31" {
+				t.Fatalf("aggregate query = %q", request.URL.RawQuery)
+			}
+			writeUpstream(response, http.StatusOK, `{"code":0,"data":{"total_requests":20,"total_tokens":200,"total_actual_cost":10}}`)
+		case "/api/v1/admin/usage":
+			if request.URL.Query().Get("sort_order") != "asc" {
+				t.Fatalf("boundary query = %q", request.URL.RawQuery)
+			}
+			writeUpstream(response, http.StatusOK, `{"code":0,"data":{"items":[`+
+				`{"user_id":2,"input_tokens":10,"output_tokens":10,"actual_cost":1,"created_at":"2026-07-29T02:00:00Z"},`+
+				`{"user_id":2,"input_tokens":90,"output_tokens":90,"actual_cost":8,"created_at":"2026-07-29T04:00:00Z"}`+
+				`],"page":1,"page_size":200,"pages":1}}`)
+		default:
+			t.Fatalf("unexpected upstream path: %s", request.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	application := newApp(testConfig(t, upstream.URL))
+	stats, upstreamErr := application.fetchUserWindowStats(
+		context.Background(),
+		2,
+		14,
+		time.Date(2026, 7, 29, 4, 0, 0, 0, time.UTC),
+		time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC),
+	)
+	if upstreamErr != nil {
+		t.Fatal(upstreamErr)
+	}
+	if stats.Requests != 19 || stats.Tokens != 180 || stats.Cost != 9 {
+		t.Fatalf("stats = %+v, want requests=19 tokens=180 cost=9", stats)
+	}
+}
+
+func TestUsageBoundaryRetriesWithSmallerPageWhenResponseIsTooLarge(t *testing.T) {
+	var pageSizes []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		pageSize := request.URL.Query().Get("page_size")
+		pageSizes = append(pageSizes, pageSize)
+		if pageSize == "200" {
+			writeUpstream(response, http.StatusOK, `{"code":0,"data":{"items":[]}}`+strings.Repeat(" ", maxUpstreamBody))
+			return
+		}
+		writeUpstream(response, http.StatusOK, `{"code":0,"data":{"items":[{"user_id":2,"input_tokens":1,"output_tokens":2,"actual_cost":0.5,"created_at":"2026-07-31T10:30:00Z"}],"page":1,"page_size":100,"pages":1}}`)
+	}))
+	defer upstream.Close()
+
+	application := newApp(testConfig(t, upstream.URL))
+	stats, upstreamErr := application.fetchUserUsageBoundary(
+		context.Background(),
+		2,
+		14,
+		time.Date(2026, 7, 31, 10, 0, 0, 0, time.UTC),
+		time.Date(2026, 7, 31, 11, 0, 0, 0, time.UTC),
+		"desc",
+	)
+	if upstreamErr != nil {
+		t.Fatal(upstreamErr)
+	}
+	if stats.Requests != 1 || stats.Tokens != 3 || stats.Cost != 0.5 {
+		t.Fatalf("stats = %+v", stats)
+	}
+	if strings.Join(pageSizes, ",") != "200,100" {
+		t.Fatalf("page sizes = %v, want [200 100]", pageSizes)
 	}
 }
 
@@ -169,5 +291,35 @@ func TestResolveAccountUsageWindowsMarksPendingZero(t *testing.T) {
 	progress, ok := payload["five_hour"].(map[string]any)
 	if !ok || progress[usageZeroPendingPayloadField] != true {
 		t.Fatalf("pending zero marker missing: %#v", payload["five_hour"])
+	}
+}
+
+func TestResolveAccountUsageWindowsPreservesActiveWindowForExpiredZeroReset(t *testing.T) {
+	application := &app{usageWindowState: newUsageWindowStateStore(filepath.Join(t.TempDir(), "usage-window-state.json"))}
+	start := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	realResetAt := start.Add(2 * time.Hour)
+
+	application.resolveAccountUsageWindows(
+		14,
+		json.RawMessage(`{"five_hour":{"utilization":25,"resets_at":"`+realResetAt.Format(time.RFC3339)+`"}}`),
+		start,
+	)
+	payload, activeWindows, ok := application.resolveAccountUsageWindows(
+		14,
+		json.RawMessage(`{"five_hour":{"utilization":0,"remaining_seconds":0,"resets_at":"`+start.Format(time.RFC3339)+`"}}`),
+		start.Add(time.Minute),
+	)
+	if !ok || len(activeWindows) != 1 {
+		t.Fatalf("resolved=%t active_windows=%d, want true and 1", ok, len(activeWindows))
+	}
+	progress, ok := payload["five_hour"].(map[string]any)
+	if !ok {
+		t.Fatalf("five_hour payload = %#v", payload["five_hour"])
+	}
+	if progress[usageZeroPendingPayloadField] != true {
+		t.Fatalf("pending zero marker missing: %#v", progress)
+	}
+	if progress["resets_at"] != realResetAt.Format(time.RFC3339) {
+		t.Fatalf("resets_at = %v, want %s", progress["resets_at"], realResetAt.Format(time.RFC3339))
 	}
 }

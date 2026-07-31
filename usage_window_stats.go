@@ -15,10 +15,11 @@ import (
 )
 
 const (
-	usageLogPageSize             = 1000
-	maxUsageLogPages             = 10000
+	initialUsageLogPageSize      = 200
+	maxUsageBoundaryRecords      = 100000
 	usageZeroConfirmationDelay   = autoResetAccountScanInterval
 	usageZeroPendingPayloadField = "utilization_pending_confirmation"
+	userStatsUnavailableField    = "user_window_stats_unavailable"
 )
 
 type usageWindowDefinition struct {
@@ -156,6 +157,31 @@ func (store *usageWindowStateStore) resolveObserved(
 	return entry.StartAt, pendingZero, true
 }
 
+// activeResetForUnexpectedZero keeps the last known active window when OpenAI
+// temporarily reports 0% together with an already-expired or missing reset time.
+func (store *usageWindowStateStore) activeResetForUnexpectedZero(
+	accountID int64,
+	definition usageWindowDefinition,
+	now time.Time,
+	utilization float64,
+	hasUtilization bool,
+) (time.Time, bool) {
+	if store == nil || accountID <= 0 || !hasUtilization || utilization != 0 {
+		return time.Time{}, false
+	}
+
+	key := strconv.FormatInt(accountID, 10) + ":" + definition.stateKey
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+
+	existing, exists := store.entries[key]
+	if !exists || existing.LastUtilization == nil || *existing.LastUtilization <= 0 ||
+		!existing.ResetAt.After(now) || !existing.StartAt.Before(now) {
+		return time.Time{}, false
+	}
+	return existing.ResetAt.UTC(), true
+}
+
 func setUsageWindowUtilization(entry *usageWindowState, utilization float64) bool {
 	if entry.LastUtilization != nil && *entry.LastUtilization == utilization {
 		return false
@@ -252,6 +278,12 @@ type userWindowStats struct {
 	Cost     float64 `json:"cost"`
 }
 
+type userUsageAggregate struct {
+	TotalRequests   int64   `json:"total_requests"`
+	TotalTokens     int64   `json:"total_tokens"`
+	TotalActualCost float64 `json:"total_actual_cost"`
+}
+
 type activeUsageWindow struct {
 	progress map[string]any
 	startAt  time.Time
@@ -276,20 +308,24 @@ func (a *app) enrichAccountUsageForUser(
 		return marshalUsagePayload(payload, data)
 	}
 
-	earliestStart := activeWindows[0].startAt
-	for _, window := range activeWindows[1:] {
-		if window.startAt.Before(earliestStart) {
-			earliestStart = window.startAt
-		}
-	}
-
-	logs, upstreamErr := a.fetchUserUsageLogs(ctx, userID, accountID, earliestStart, now)
-	if upstreamErr != nil {
-		return marshalUsagePayload(payload, data)
-	}
-
 	for _, window := range activeWindows {
-		stats := summarizeUserUsageLogs(logs, userID, window.startAt, window.resetAt)
+		stats, upstreamErr := a.fetchUserWindowStats(ctx, userID, accountID, window.startAt, now)
+		if upstreamErr != nil {
+			log.Printf(
+				"user usage window stats failed: user_id=%d account_id=%d start_at=%s end_at=%s: %v",
+				userID,
+				accountID,
+				window.startAt.Format(time.RFC3339),
+				now.Format(time.RFC3339),
+				upstreamErr,
+			)
+			window.progress[userStatsUnavailableField] = true
+			delete(window.progress, "user_window_stats")
+			delete(window.progress, "user_utilization")
+			delete(window.progress, "user_utilization_estimated")
+			continue
+		}
+		delete(window.progress, userStatsUnavailableField)
 		window.progress["user_window_stats"] = stats
 		if pending, _ := window.progress[usageZeroPendingPayloadField].(bool); pending {
 			continue
@@ -333,12 +369,25 @@ func (a *app) resolveAccountUsageWindows(
 		if !ok || progress == nil {
 			continue
 		}
-		resetAt, ok := parseUsageTimestamp(progress["resets_at"])
-		if !ok || !resetAt.After(now) {
-			continue
+		utilization, hasUtilization := numberValue(progress["utilization"])
+		resetAt, hasActiveReset := parseUsageTimestamp(progress["resets_at"])
+		hasActiveReset = hasActiveReset && resetAt.After(now)
+		if !hasActiveReset {
+			preservedResetAt, preserved := a.usageWindowState.activeResetForUnexpectedZero(
+				accountID,
+				definition,
+				now,
+				utilization,
+				hasUtilization,
+			)
+			if !preserved {
+				continue
+			}
+			resetAt = preservedResetAt
+			progress["resets_at"] = resetAt.Format(time.RFC3339)
+			progress["remaining_seconds"] = int(resetAt.Sub(now).Seconds())
 		}
 		suggestedStart, _ := parseUsageTimestamp(progress["window_start_at"])
-		utilization, hasUtilization := numberValue(progress["utilization"])
 		startAt, pendingZero, ok := a.usageWindowState.resolveObserved(
 			accountID,
 			definition,
@@ -367,39 +416,176 @@ func (a *app) resolveAccountUsageWindows(
 	return payload, activeWindows, true
 }
 
-func (a *app) fetchUserUsageLogs(
+// fetchUserWindowStats uses Sub2API's aggregate endpoint for the bulk of a
+// window. Since that endpoint accepts calendar dates instead of timestamps, it
+// reads only the shorter side of the first partial UTC day from usage details
+// and adds or subtracts that boundary. At most one partial day is paged.
+func (a *app) fetchUserWindowStats(
 	ctx context.Context,
 	userID, accountID int64,
 	startAt, endAt time.Time,
-) ([]usageLogEntry, *upstreamAPIError) {
+) (userWindowStats, *upstreamAPIError) {
 	if userID <= 0 || accountID <= 0 || startAt.IsZero() || !endAt.After(startAt) {
-		return []usageLogEntry{}, nil
+		return userWindowStats{}, nil
+	}
+	startAt = startAt.UTC()
+	endAt = endAt.UTC()
+	startDay := utcDayStart(startAt)
+	nextDay := startDay.AddDate(0, 0, 1)
+	boundaryEnd := nextDay
+	if endAt.Before(boundaryEnd) {
+		boundaryEnd = endAt
 	}
 
+	if startAt.Equal(startDay) {
+		return a.fetchAggregatedUserUsageStats(ctx, userID, accountID, startDay, endAt)
+	}
+
+	prefixDuration := startAt.Sub(startDay)
+	suffixDuration := boundaryEnd.Sub(startAt)
+	if prefixDuration <= suffixDuration {
+		total, upstreamErr := a.fetchAggregatedUserUsageStats(ctx, userID, accountID, startDay, endAt)
+		if upstreamErr != nil {
+			return userWindowStats{}, upstreamErr
+		}
+		excluded, upstreamErr := a.fetchUserUsageBoundary(ctx, userID, accountID, startDay, startAt, "asc")
+		if upstreamErr != nil {
+			return userWindowStats{}, upstreamErr
+		}
+		return subtractUserWindowStats(total, excluded)
+	}
+
+	total := userWindowStats{}
+	if nextDay.Before(endAt) {
+		var upstreamErr *upstreamAPIError
+		total, upstreamErr = a.fetchAggregatedUserUsageStats(ctx, userID, accountID, nextDay, endAt)
+		if upstreamErr != nil {
+			return userWindowStats{}, upstreamErr
+		}
+	}
+	boundary, upstreamErr := a.fetchUserUsageBoundary(ctx, userID, accountID, startAt, boundaryEnd, "desc")
+	if upstreamErr != nil {
+		return userWindowStats{}, upstreamErr
+	}
+	return addUserWindowStats(total, boundary), nil
+}
+
+func (a *app) fetchAggregatedUserUsageStats(
+	ctx context.Context,
+	userID, accountID int64,
+	startAt, endAt time.Time,
+) (userWindowStats, *upstreamAPIError) {
+	if !endAt.After(startAt) {
+		return userWindowStats{}, nil
+	}
+	lastIncluded := endAt.UTC().Add(-time.Nanosecond)
 	query := url.Values{
-		"page_size":  {strconv.Itoa(usageLogPageSize)},
 		"user_id":    {strconv.FormatInt(userID, 10)},
 		"account_id": {strconv.FormatInt(accountID, 10)},
 		"start_date": {startAt.UTC().Format("2006-01-02")},
-		"end_date":   {endAt.UTC().Format("2006-01-02")},
+		"end_date":   {lastIncluded.Format("2006-01-02")},
+		"timezone":   {"UTC"},
+		"nocache":    {"true"},
+	}
+	var aggregate userUsageAggregate
+	if upstreamErr := a.doAdminRequest(ctx, http.MethodGet, "/admin/usage/stats", query, &aggregate); upstreamErr != nil {
+		return userWindowStats{}, upstreamErr
+	}
+	return userWindowStats{
+		Requests: aggregate.TotalRequests,
+		Tokens:   aggregate.TotalTokens,
+		Cost:     aggregate.TotalActualCost,
+	}, nil
+}
+
+func (a *app) fetchUserUsageBoundary(
+	ctx context.Context,
+	userID, accountID int64,
+	startAt, endAt time.Time,
+	sortOrder string,
+) (userWindowStats, *upstreamAPIError) {
+	if !endAt.After(startAt) {
+		return userWindowStats{}, nil
+	}
+	pageSize := initialUsageLogPageSize
+	for {
+		stats, upstreamErr := a.fetchUserUsageBoundaryWithPageSize(
+			ctx,
+			userID,
+			accountID,
+			startAt.UTC(),
+			endAt.UTC(),
+			sortOrder,
+			pageSize,
+		)
+		if upstreamErr == nil || !isUpstreamResponseTooLarge(upstreamErr) || pageSize == 1 {
+			return stats, upstreamErr
+		}
+		pageSize /= 2
+		if pageSize < 1 {
+			pageSize = 1
+		}
+		log.Printf(
+			"usage boundary response too large; retrying: user_id=%d account_id=%d page_size=%d",
+			userID,
+			accountID,
+			pageSize,
+		)
+	}
+}
+
+func (a *app) fetchUserUsageBoundaryWithPageSize(
+	ctx context.Context,
+	userID, accountID int64,
+	startAt, endAt time.Time,
+	sortOrder string,
+	pageSize int,
+) (userWindowStats, *upstreamAPIError) {
+	if pageSize <= 0 {
+		pageSize = 1
+	}
+	day := utcDayStart(startAt)
+
+	query := url.Values{
+		"page_size":  {strconv.Itoa(pageSize)},
+		"user_id":    {strconv.FormatInt(userID, 10)},
+		"account_id": {strconv.FormatInt(accountID, 10)},
+		"start_date": {day.Format("2006-01-02")},
+		"end_date":   {day.Format("2006-01-02")},
 		"timezone":   {"UTC"},
 		"sort_by":    {"created_at"},
-		"sort_order": {"asc"},
+		"sort_order": {sortOrder},
 	}
 
-	logs := make([]usageLogEntry, 0)
-	for page := 1; page <= maxUsageLogPages; page++ {
+	stats := userWindowStats{}
+	maxPages := (maxUsageBoundaryRecords + pageSize - 1) / pageSize
+	for page := 1; page <= maxPages; page++ {
 		query.Set("page", strconv.Itoa(page))
 		var result usageLogPage
 		if upstreamErr := a.doAdminRequest(ctx, http.MethodGet, "/admin/usage", query, &result); upstreamErr != nil {
-			return nil, upstreamErr
+			return userWindowStats{}, upstreamErr
 		}
-		logs = append(logs, result.Items...)
+		for _, entry := range result.Items {
+			createdAt, err := time.Parse(time.RFC3339Nano, entry.CreatedAt)
+			if err != nil {
+				continue
+			}
+			createdAt = createdAt.UTC()
+			if sortOrder == "asc" && !createdAt.Before(endAt) {
+				return stats, nil
+			}
+			if sortOrder == "desc" && createdAt.Before(startAt) {
+				return stats, nil
+			}
+			if entry.UserID == userID && !createdAt.Before(startAt) && createdAt.Before(endAt) {
+				accumulateUserUsage(&stats, entry)
+			}
+		}
 		if result.Pages <= page || len(result.Items) == 0 {
-			break
+			return stats, nil
 		}
 	}
-	return logs, nil
+	return userWindowStats{}, &upstreamAPIError{Message: "Sub2API 用户用量边界明细超过安全上限"}
 }
 
 func summarizeUserUsageLogs(logs []usageLogEntry, userID int64, startAt, endAt time.Time) userWindowStats {
@@ -412,11 +598,48 @@ func summarizeUserUsageLogs(logs []usageLogEntry, userID int64, startAt, endAt t
 		if err != nil || createdAt.Before(startAt) || !createdAt.Before(endAt) {
 			continue
 		}
-		stats.Requests++
-		stats.Tokens += int64(entry.InputTokens + entry.OutputTokens + entry.CacheCreationTokens + entry.CacheReadTokens)
-		stats.Cost += entry.ActualCost
+		accumulateUserUsage(&stats, entry)
 	}
 	return stats
+}
+
+func accumulateUserUsage(stats *userWindowStats, entry usageLogEntry) {
+	stats.Requests++
+	stats.Tokens += int64(entry.InputTokens + entry.OutputTokens + entry.CacheCreationTokens + entry.CacheReadTokens)
+	stats.Cost += entry.ActualCost
+}
+
+func addUserWindowStats(left, right userWindowStats) userWindowStats {
+	return userWindowStats{
+		Requests: left.Requests + right.Requests,
+		Tokens:   left.Tokens + right.Tokens,
+		Cost:     left.Cost + right.Cost,
+	}
+}
+
+func subtractUserWindowStats(total, excluded userWindowStats) (userWindowStats, *upstreamAPIError) {
+	const costTolerance = 1e-9
+	if excluded.Requests > total.Requests || excluded.Tokens > total.Tokens || excluded.Cost > total.Cost+costTolerance {
+		return userWindowStats{}, &upstreamAPIError{Message: "Sub2API 用户用量聚合结果不一致"}
+	}
+	result := userWindowStats{
+		Requests: total.Requests - excluded.Requests,
+		Tokens:   total.Tokens - excluded.Tokens,
+		Cost:     total.Cost - excluded.Cost,
+	}
+	if result.Cost < 0 && result.Cost >= -costTolerance {
+		result.Cost = 0
+	}
+	return result, nil
+}
+
+func utcDayStart(value time.Time) time.Time {
+	value = value.UTC()
+	return time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+func isUpstreamResponseTooLarge(upstreamErr *upstreamAPIError) bool {
+	return upstreamErr != nil && upstreamErr.Message == "Sub2API 响应过大"
 }
 
 func usageWindowAccountCost(progress map[string]any) (float64, bool) {

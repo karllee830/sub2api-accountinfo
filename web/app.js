@@ -382,6 +382,8 @@
     const userWindowStats = usage.user_window_stats
     if (userWindowStats && userWindowStats.cost !== undefined && userWindowStats.cost !== null) {
       stats.append(createChip(`当前用户消费 $${formatMoney(userWindowStats.cost)}`))
+    } else if (usage.user_window_stats_unavailable) {
+      stats.append(createChip('当前用户用量暂不可用', 'stat-chip stat-chip-warning'))
     }
     const reset = document.createElement('span')
     reset.className = 'reset-time'
