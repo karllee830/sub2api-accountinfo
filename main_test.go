@@ -79,7 +79,7 @@ func TestDashboardAuthenticatesUserAndLoadsSubscribedAccountUsage(t *testing.T) 
 			writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":{"items":[{"id":14,"name":"account@example.com","platform":"openai","type":"oauth","status":"active","schedulable":true,"group_ids":[9],"credentials":{"access_token":"must-not-leak"}}],"total":1,"page":1,"page_size":100,"pages":1}}`)
 		case "/api/v1/admin/accounts/14/usage":
 			assertAdminRequest(t, request)
-			if request.URL.Query().Get("source") != "active" || request.URL.Query().Get("force") != "true" {
+			if request.URL.Query().Get("source") != "active" || request.URL.Query().Get("force") != "true" || request.URL.Query().Get("user_id") != "2" {
 				t.Errorf("usage query = %q", request.URL.RawQuery)
 			}
 			writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":{"updated_at":"2026-07-17T12:00:00Z","five_hour":{"utilization":25}}}`)
@@ -432,7 +432,8 @@ func TestUsageWindowStatsUseChineseLabelsAndBudgetEstimate(t *testing.T) {
 		"请求 ${formatCompact(windowStats.requests)}",
 		"令牌 ${formatCompact(windowStats.tokens)}",
 		"账号消费 $${formatMoney(windowStats.cost)}",
-		"用户消费 $${formatMoney(windowStats.user_cost)}",
+		"当前用户消费 $${formatMoney(userWindowStats.cost)}",
+		"usage.user_utilization",
 		"推算总额度 $${formatMoney(budget.total)}",
 		"推算剩余 $${formatMoney(budget.remaining)}",
 		"const total = spent / (utilization / 100)",

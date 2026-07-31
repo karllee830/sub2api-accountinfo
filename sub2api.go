@@ -173,7 +173,7 @@ func (a *app) loadDashboard(ctx context.Context, userID int64, active bool) (*da
 		}
 		groups[index].Accounts = accounts
 	}
-	a.loadAccountUsage(ctx, groups, active)
+	a.loadAccountUsage(ctx, groups, userID, active)
 	accountIDs := make(map[int64]struct{})
 	for _, group := range groups {
 		for _, account := range group.Accounts {
@@ -282,7 +282,7 @@ func (a *app) listGroupAccounts(ctx context.Context, groupID int64) ([]accountVi
 	return accounts, nil
 }
 
-func (a *app) loadAccountUsage(ctx context.Context, groups []dashboardGroup, active bool) {
+func (a *app) loadAccountUsage(ctx context.Context, groups []dashboardGroup, userID int64, active bool) {
 	accountIDs := make(map[int64]struct{})
 	for _, group := range groups {
 		for _, account := range group.Accounts {
@@ -311,6 +311,9 @@ func (a *app) loadAccountUsage(ctx context.Context, groups []dashboardGroup, act
 			defer func() { <-semaphore }()
 
 			query := url.Values{}
+			if userID > 0 {
+				query.Set("user_id", strconv.FormatInt(userID, 10))
+			}
 			if active {
 				query.Set("source", "active")
 				query.Set("force", "true")
