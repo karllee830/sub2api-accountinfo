@@ -161,9 +161,8 @@ func (a *app) runAutoResetCredits(ctx context.Context) {
 }
 
 func (worker *autoResetWorker) step(ctx context.Context, now time.Time) time.Time {
-	var usageScanAccountIDs []int64
 	if worker.nextDiscovery.IsZero() || !now.Before(worker.nextDiscovery) {
-		usageScanAccountIDs = worker.discoverAccounts(ctx, now)
+		worker.discoverAccounts(ctx, now)
 	}
 
 	accountIDs := make([]int64, 0, len(worker.accounts))
@@ -197,7 +196,6 @@ func (worker *autoResetWorker) step(ctx context.Context, now time.Time) time.Tim
 		}
 	}
 	worker.publishSchedule()
-	worker.scanUsageWindows(ctx, usageScanAccountIDs, worker.now().UTC())
 	return worker.nextWake(now)
 }
 
@@ -242,26 +240,20 @@ func (worker *autoResetWorker) consumeDueCredits(ctx context.Context, tasks []au
 	waitGroup.Wait()
 }
 
-func (worker *autoResetWorker) discoverAccounts(ctx context.Context, now time.Time) []int64 {
+func (worker *autoResetWorker) discoverAccounts(ctx context.Context, now time.Time) {
 	accounts, upstreamErr := worker.app.listAutoResetAccounts(ctx)
 	if upstreamErr != nil {
 		log.Printf("automatic reset account scan failed: %v", upstreamErr)
 		worker.nextDiscovery = now.Add(autoResetAccountScanRetry)
-		return nil
+		return
 	}
 
 	seen := make(map[int64]struct{}, len(accounts))
 	seenOpenAIAccounts := make(map[string]struct{}, len(accounts))
-	usageScanSeen := make(map[int64]struct{}, len(accounts))
-	usageScanAccountIDs := make([]int64, 0, len(accounts))
 	newAccountIndex := 0
 	for _, account := range accounts {
 		if !isAutoResetAccountEligible(account) {
 			continue
-		}
-		if _, duplicate := usageScanSeen[account.ID]; !duplicate {
-			usageScanSeen[account.ID] = struct{}{}
-			usageScanAccountIDs = append(usageScanAccountIDs, account.ID)
 		}
 		identity := autoResetAccountIdentity(account)
 		if _, duplicate := seenOpenAIAccounts[identity]; duplicate {
@@ -283,37 +275,6 @@ func (worker *autoResetWorker) discoverAccounts(ctx context.Context, now time.Ti
 		}
 	}
 	worker.nextDiscovery = now.Add(autoResetAccountScanInterval)
-	return usageScanAccountIDs
-}
-
-func (worker *autoResetWorker) scanUsageWindows(ctx context.Context, accountIDs []int64, now time.Time) {
-	if worker.app == nil || worker.app.usageWindowState == nil || len(accountIDs) == 0 || ctx.Err() != nil {
-		return
-	}
-
-	semaphore := make(chan struct{}, usageConcurrency)
-	var waitGroup sync.WaitGroup
-	for _, accountID := range accountIDs {
-		accountID := accountID
-		waitGroup.Add(1)
-		go func() {
-			defer waitGroup.Done()
-			select {
-			case semaphore <- struct{}{}:
-				defer func() { <-semaphore }()
-			case <-ctx.Done():
-				return
-			}
-
-			data, upstreamErr := worker.app.queryAccountUsage(ctx, accountID, true)
-			if upstreamErr != nil {
-				log.Printf("automatic usage window scan failed for account %d: %v", accountID, upstreamErr)
-				return
-			}
-			worker.app.resolveAccountUsageWindows(accountID, data, now)
-		}()
-	}
-	waitGroup.Wait()
 }
 
 func (worker *autoResetWorker) refreshQuota(

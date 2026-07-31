@@ -230,14 +230,6 @@
   }
 
   function windowProgressValues(usage) {
-    if (usage?.utilization_pending_confirmation === true) {
-      return {
-        account: null,
-        user: null,
-        hasUser: false,
-        isPending: true
-      }
-    }
     const accountUtilization = Math.max(0, Math.min(100, Number(usage?.utilization) || 0))
     const userUtilization = Number(usage?.user_utilization)
     const hasUser = usage?.user_utilization !== undefined &&
@@ -247,8 +239,7 @@
     return {
       account: accountUtilization,
       user: hasUser ? Math.min(accountUtilization, Math.max(0, Math.min(100, userUtilization))) : null,
-      hasUser,
-      isPending: false
+      hasUser
     }
   }
 
@@ -304,6 +295,14 @@
     if (days > 0) return `${days}天 ${hours}小时`
     if (hours > 0) return `${hours}小时 ${restMinutes}分钟`
     return `${restMinutes}分钟`
+  }
+
+  function formatResetStatus(value, utilization) {
+    const distance = formatResetTime(value, utilization)
+    if (distance === '等待刷新') return distance
+    if (distance === '现在') return '即将重置'
+    if (distance === '-') return '重置时间未知'
+    return `${distance}后重置`
   }
 
   function hasRenderableUsageWindow(usage) {
@@ -380,37 +379,35 @@
     const reset = document.createElement('span')
     reset.className = 'window-reset-status'
     reset.title = usage.reset_time_pending
-      ? '暂未获取到重置时间，请等待下次重置'
+      ? '暂未获取到重置时间，请等待使用一些时间后再查看'
       : (usage.resets_at ? formatDate(usage.resets_at) : '')
     reset.textContent = usage.reset_time_pending
       ? '重置时间待确认'
-      : `重置 ${formatResetTime(usage.resets_at, usage.utilization)}`
+      : formatResetStatus(usage.resets_at, usage.utilization)
     if (usage.reset_time_pending) reset.classList.add('is-pending')
     heading.append(labelNode, reset)
     const progress = windowProgressValues(usage)
     const userPercentageText = progress.hasUser
       ? formatPercent(progress.user)
-      : progress.isPending
-        ? '待复核'
-        : usage.reset_time_pending
-          ? '待确认'
-          : usage.user_window_stats_unavailable
-            ? '暂不可用'
-            : '待统计'
+      : usage.reset_time_pending
+        ? '待确认'
+        : usage.user_window_stats_unavailable
+          ? '暂不可用'
+          : '待统计'
     const percentages = document.createElement('div')
     percentages.className = 'window-percentages'
     percentages.append(
-      createWindowPercentage('当前用户', userPercentageText, 'window-percentage-user'),
+      createWindowPercentage('您的用量', userPercentageText, 'window-percentage-user'),
       createWindowPercentage(
         '账号总用量',
-        progress.isPending ? '复核中' : formatPercent(progress.account),
+        formatPercent(progress.account),
         'window-percentage-account'
       )
     )
     if (progress.hasUser) {
       percentages.title = usage.user_utilization_estimated
-        ? '当前用户比例按账号用量和用户消费占比估算'
-        : '当前用户与账号总用量'
+        ? '您的用量比例按账号用量和用户消费占比估算'
+        : '您的用量与账号总用量'
     }
     header.append(heading, percentages)
 
@@ -419,44 +416,36 @@
     track.setAttribute('role', 'progressbar')
     track.setAttribute('aria-valuemin', '0')
     track.setAttribute('aria-valuemax', '100')
-    if (progress.isPending) {
-      track.classList.add('is-pending')
-      track.setAttribute('aria-valuetext', 'OpenAI 用量数据复核中')
-    } else {
-      track.setAttribute('aria-valuenow', String(progress.account))
-      track.setAttribute(
-        'aria-valuetext',
-        progress.hasUser
-          ? `账号总用量 ${formatPercent(progress.account)}，当前用户 ${formatPercent(progress.user)}`
-          : `账号总用量 ${formatPercent(progress.account)}，当前用户比例${userPercentageText}`
-      )
-    }
+    track.setAttribute('aria-valuenow', String(progress.account))
+    track.setAttribute(
+      'aria-valuetext',
+      progress.hasUser
+        ? `账号总用量 ${formatPercent(progress.account)}，您的用量 ${formatPercent(progress.user)}`
+        : `账号总用量 ${formatPercent(progress.account)}，您的用量比例${userPercentageText}`
+    )
     const accountBar = document.createElement('div')
     accountBar.className = 'progress-bar progress-bar-account'
-    accountBar.style.width = progress.isPending ? '0%' : `${progress.account}%`
-    accountBar.title = progress.isPending ? '账号总用量复核中' : `账号总用量 ${formatPercent(progress.account)}`
+    accountBar.style.width = `${progress.account}%`
+    accountBar.title = `账号总用量 ${formatPercent(progress.account)}`
     const userBar = document.createElement('div')
     userBar.className = 'progress-bar progress-bar-user'
     userBar.style.width = progress.hasUser ? `${progress.user}%` : '0%'
-    userBar.title = progress.hasUser ? `当前用户 ${formatPercent(progress.user)}` : `当前用户比例${userPercentageText}`
+    userBar.title = progress.hasUser ? `您的用量 ${formatPercent(progress.user)}` : `您的用量比例${userPercentageText}`
     track.append(accountBar, userBar)
 
     const alerts = document.createElement('div')
     alerts.className = 'window-alerts'
-    if (progress.isPending) {
-      alerts.append(createWindowAlert('OpenAI 暂时返回 0%，正在等待下一轮扫描确认'))
-    }
     if (usage.reset_time_pending) {
-      alerts.append(createWindowAlert('暂未获取到重置时间，请等待下次重置'))
+      alerts.append(createWindowAlert('暂未获取到重置时间，请等待使用一些时间后再查看'))
     }
 
     const details = document.createElement('div')
     details.className = 'window-details'
-    const windowStats = progress.isPending ? null : usage.window_stats
+    const windowStats = usage.window_stats
     if (windowStats) {
       details.append(createWindowDetailGroup('账号用量', [
-        createWindowMetric('请求', formatCompact(windowStats.requests)),
-        createWindowMetric('令牌', formatCompact(windowStats.tokens)),
+        createWindowMetric('请求数', formatCompact(windowStats.requests)),
+        createWindowMetric('令牌', `${formatCompact(windowStats.tokens)} Token`),
         createWindowMetric('消费', `$${formatMoney(windowStats.cost)}`)
       ], 'window-detail-group-account'))
 
@@ -471,11 +460,11 @@
     const userWindowStats = usage.user_window_stats
     if (userWindowStats && userWindowStats.cost !== undefined && userWindowStats.cost !== null) {
       const userCostLabel = usage.reset_time_pending ? '临时统计消费' : '窗口消费'
-      details.append(createWindowDetailGroup('当前用户', [
+      details.append(createWindowDetailGroup('您的用量', [
         createWindowMetric(userCostLabel, `$${formatMoney(userWindowStats.cost)}`, 'window-metric-user')
       ], 'window-detail-group-user'))
     } else if (usage.user_window_stats_unavailable) {
-      details.append(createWindowDetailGroup('当前用户', [
+      details.append(createWindowDetailGroup('您的用量', [
         createWindowMetric('消费统计', '暂不可用', 'window-metric-warning')
       ], 'window-detail-group-user window-detail-group-warning'))
     }

@@ -451,29 +451,39 @@ func TestUsageWindowStatsUseChineseLabelsAndBudgetEstimate(t *testing.T) {
 	content := string(script)
 	for _, text := range []string{
 		"createWindowDetailGroup('账号用量'",
-		"createWindowMetric('请求', formatCompact(windowStats.requests))",
-		"createWindowMetric('令牌', formatCompact(windowStats.tokens))",
+		"createWindowMetric('请求数', formatCompact(windowStats.requests))",
+		"createWindowMetric('令牌', `${formatCompact(windowStats.tokens)} Token`)",
 		"createWindowMetric('消费', `$${formatMoney(windowStats.cost)}`)",
 		"createWindowDetailGroup('额度估算'",
 		"createWindowMetric('总额度', `$${formatMoney(budget.total)}`",
 		"createWindowMetric('剩余额度', `$${formatMoney(budget.remaining)}`",
-		"createWindowDetailGroup('当前用户'",
+		"createWindowDetailGroup('您的用量'",
 		"usage.reset_time_pending ? '临时统计消费' : '窗口消费'",
 		"createWindowMetric(userCostLabel, `$${formatMoney(userWindowStats.cost)}`",
-		"暂未获取到重置时间，请等待下次重置",
+		"暂未获取到重置时间，请等待使用一些时间后再查看",
 		"usage.user_utilization",
 		"const total = spent / (utilization / 100)",
 		"function windowProgressValues(usage)",
-		"usage?.utilization_pending_confirmation === true",
-		"createWindowPercentage('当前用户'",
+		"return `${distance}后重置`",
+		": formatResetStatus(usage.resets_at, usage.utilization)",
+		"createWindowPercentage('您的用量'",
 		"'账号总用量'",
 		"progress-bar progress-bar-account",
 		"progress-bar progress-bar-user",
-		"账号总用量 ${formatPercent(progress.account)}，当前用户 ${formatPercent(progress.user)}",
-		"OpenAI 暂时返回 0%，正在等待下一轮扫描确认",
+		"账号总用量 ${formatPercent(progress.account)}，您的用量 ${formatPercent(progress.user)}",
 	} {
 		if !strings.Contains(content, text) {
 			t.Fatalf("usage window display rule is missing %q", text)
+		}
+	}
+	for _, text := range []string{
+		"OpenAI 暂时返回 0%，正在等待下一轮扫描确认",
+		"usage?.utilization_pending_confirmation === true",
+		"暂未获取到重置时间，请等待下次重置",
+		"`重置 ${formatResetTime(usage.resets_at, usage.utilization)}`",
+	} {
+		if strings.Contains(content, text) {
+			t.Fatalf("obsolete usage window rule remains %q", text)
 		}
 	}
 }

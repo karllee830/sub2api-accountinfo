@@ -497,11 +497,6 @@ h3 {
   background: var(--track);
 }
 
-.progress-track.is-pending {
-  background: var(--surface-muted);
-  box-shadow: inset 0 0 0 1px var(--border-strong);
-}
-
 .progress-bar {
   position: absolute;
   top: 0;

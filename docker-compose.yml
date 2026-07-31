@@ -5,7 +5,5 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    volumes:
-      - ./data:/app/data
     ports:
       - "${HOST_PORT:-8080}:8080"

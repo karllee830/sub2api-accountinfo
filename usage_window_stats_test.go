@@ -5,38 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
-
-func TestUsageWindowStateStorePersistsWindowStart(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "usage-window-state.json")
-	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
-	resetAt := now.Add(2 * time.Hour)
-	definition := usageWindowDefinitions[0]
-
-	store := newUsageWindowStateStore(path)
-	got, ok := store.resolve(14, definition, resetAt, time.Time{}, now)
-	if !ok {
-		t.Fatal("resolve() returned false")
-	}
-	want := resetAt.Add(-5 * time.Hour)
-	if !got.Equal(want) {
-		t.Fatalf("start = %v, want %v", got, want)
-	}
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("state file was not persisted: %v", err)
-	}
-
-	reloaded := newUsageWindowStateStore(path)
-	got, ok = reloaded.resolve(14, definition, resetAt, resetAt.Add(-time.Hour), now)
-	if !ok || !got.Equal(want) {
-		t.Fatalf("reloaded start = %v, %v; want %v, true", got, ok, want)
-	}
-}
 
 func TestUserUsageAggregateRequiresAllFields(t *testing.T) {
 	requests := int64(1)
@@ -114,7 +86,7 @@ func TestEnrichAccountUsageShowsProvisionalCostWithoutResetTime(t *testing.T) {
 		t.Fatalf("provisional window must not estimate user utilization: %#v", progress)
 	}
 
-	_, activeWindows, ok := application.resolveAccountUsageWindowsWithOptions(14, raw, now, false)
+	_, activeWindows, ok := resolveAccountUsageWindows(raw, now, false)
 	if !ok || len(activeWindows) != 0 {
 		t.Fatalf("non-eligible account active windows = %d, want 0", len(activeWindows))
 	}
@@ -319,115 +291,59 @@ func TestUsageBoundaryRejectsMalformedTimestamp(t *testing.T) {
 	}
 }
 
-func TestUsageZeroRequiresSeparatedConfirmation(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "usage-window-state.json")
-	store := newUsageWindowStateStore(path)
-	start := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
-	resetAt := start.Add(2 * time.Hour)
-	definition := usageWindowDefinitions[0]
+func TestResolveAccountUsageWindowStartFromResetTime(t *testing.T) {
+	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	raw := json.RawMessage(`{"five_hour":{"utilization":25,"resets_at":"2026-07-31T14:00:00Z"}}`)
 
-	observe := func(at time.Time, utilization float64) bool {
-		t.Helper()
-		_, pending, ok := store.resolveObserved(14, definition, resetAt, time.Time{}, at, utilization, true)
-		if !ok {
-			t.Fatal("resolveObserved() returned false")
-		}
-		return pending
-	}
-
-	if observe(start, 25) {
-		t.Fatal("initial non-zero utilization must not be pending")
-	}
-	firstZeroAt := start.Add(time.Minute)
-	if !observe(firstZeroAt, 0) {
-		t.Fatal("first unexpected zero must be pending")
-	}
-
-	store = newUsageWindowStateStore(path)
-	if !observe(firstZeroAt.Add(usageZeroConfirmationDelay-time.Second), 0) {
-		t.Fatal("zero before the confirmation delay must remain pending after reload")
-	}
-	if observe(firstZeroAt.Add(usageZeroConfirmationDelay), 0) {
-		t.Fatal("separated zero confirmation must be accepted")
-	}
-
-	state := store.entries["14:5h"]
-	if state.LastUtilization == nil || *state.LastUtilization != 0 {
-		t.Fatalf("confirmed utilization = %v, want 0", state.LastUtilization)
-	}
-	if state.PendingZeroSince != nil || state.PendingZeroResetAt != nil {
-		t.Fatalf("pending zero was not cleared: %#v", state)
-	}
-}
-
-func TestUsageZeroRecoveryAndKnownResetClearPendingState(t *testing.T) {
-	store := newUsageWindowStateStore(filepath.Join(t.TempDir(), "usage-window-state.json"))
-	start := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
-	resetAt := start.Add(2 * time.Hour)
-	definition := usageWindowDefinitions[0]
-
-	if _, _, ok := store.resolveObserved(14, definition, resetAt, time.Time{}, start, 25, true); !ok {
-		t.Fatal("initial observation failed")
-	}
-	if _, pending, ok := store.resolveObserved(14, definition, resetAt, time.Time{}, start.Add(time.Minute), 0, true); !ok || !pending {
-		t.Fatalf("first zero pending = %t, ok = %t; want true, true", pending, ok)
-	}
-	if _, pending, ok := store.resolveObserved(14, definition, resetAt, time.Time{}, start.Add(2*time.Minute), 25, true); !ok || pending {
-		t.Fatalf("recovered value pending = %t, ok = %t; want false, true", pending, ok)
-	}
-
-	store.invalidateAccount(14)
-	if _, pending, ok := store.resolveObserved(14, definition, resetAt, time.Time{}, start.Add(3*time.Minute), 0, true); !ok || pending {
-		t.Fatalf("known reset zero pending = %t, ok = %t; want false, true", pending, ok)
-	}
-}
-
-func TestResolveAccountUsageWindowsMarksPendingZero(t *testing.T) {
-	application := &app{usageWindowState: newUsageWindowStateStore(filepath.Join(t.TempDir(), "usage-window-state.json"))}
-	start := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
-	resetAt := "2026-07-31T14:00:00Z"
-
-	application.resolveAccountUsageWindows(14, json.RawMessage(`{"five_hour":{"utilization":25,"resets_at":"`+resetAt+`"}}`), start)
-	payload, _, ok := application.resolveAccountUsageWindows(
-		14,
-		json.RawMessage(`{"five_hour":{"utilization":0,"resets_at":"`+resetAt+`"}}`),
-		start.Add(time.Minute),
-	)
-	if !ok {
-		t.Fatal("zero payload was not resolved")
-	}
-	progress, ok := payload["five_hour"].(map[string]any)
-	if !ok || progress[usageZeroPendingPayloadField] != true {
-		t.Fatalf("pending zero marker missing: %#v", payload["five_hour"])
-	}
-}
-
-func TestResolveAccountUsageWindowsPreservesActiveWindowForExpiredZeroReset(t *testing.T) {
-	application := &app{usageWindowState: newUsageWindowStateStore(filepath.Join(t.TempDir(), "usage-window-state.json"))}
-	start := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
-	realResetAt := start.Add(2 * time.Hour)
-
-	application.resolveAccountUsageWindows(
-		14,
-		json.RawMessage(`{"five_hour":{"utilization":25,"resets_at":"`+realResetAt.Format(time.RFC3339)+`"}}`),
-		start,
-	)
-	payload, activeWindows, ok := application.resolveAccountUsageWindows(
-		14,
-		json.RawMessage(`{"five_hour":{"utilization":0,"remaining_seconds":0,"resets_at":"`+start.Format(time.RFC3339)+`"}}`),
-		start.Add(time.Minute),
-	)
+	payload, activeWindows, ok := resolveAccountUsageWindows(raw, now, false)
 	if !ok || len(activeWindows) != 1 {
 		t.Fatalf("resolved=%t active_windows=%d, want true and 1", ok, len(activeWindows))
 	}
-	progress, ok := payload["five_hour"].(map[string]any)
-	if !ok {
-		t.Fatalf("five_hour payload = %#v", payload["five_hour"])
+	wantStart := time.Date(2026, 7, 31, 9, 0, 0, 0, time.UTC)
+	if !activeWindows[0].startAt.Equal(wantStart) {
+		t.Fatalf("window start = %s, want %s", activeWindows[0].startAt, wantStart)
 	}
-	if progress[usageZeroPendingPayloadField] != true {
-		t.Fatalf("pending zero marker missing: %#v", progress)
+	progress := payload["five_hour"].(map[string]any)
+	if progress["window_start_at"] != wantStart.Format(time.RFC3339) {
+		t.Fatalf("window_start_at = %v, want %s", progress["window_start_at"], wantStart.Format(time.RFC3339))
 	}
-	if progress["resets_at"] != realResetAt.Format(time.RFC3339) {
-		t.Fatalf("resets_at = %v, want %s", progress["resets_at"], realResetAt.Format(time.RFC3339))
+	if progress["remaining_seconds"] != int64(2*time.Hour/time.Second) {
+		t.Fatalf("remaining_seconds = %v, want 7200", progress["remaining_seconds"])
+	}
+}
+
+func TestResolveAccountUsageWindowStartFromRemainingSeconds(t *testing.T) {
+	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	raw := json.RawMessage(`{"seven_day":{"utilization":40,"remaining_seconds":172800}}`)
+
+	payload, activeWindows, ok := resolveAccountUsageWindows(raw, now, false)
+	if !ok || len(activeWindows) != 1 {
+		t.Fatalf("resolved=%t active_windows=%d, want true and 1", ok, len(activeWindows))
+	}
+	wantReset := now.Add(48 * time.Hour)
+	wantStart := wantReset.Add(-7 * 24 * time.Hour)
+	if !activeWindows[0].startAt.Equal(wantStart) {
+		t.Fatalf("window start = %s, want %s", activeWindows[0].startAt, wantStart)
+	}
+	progress := payload["seven_day"].(map[string]any)
+	if progress["resets_at"] != wantReset.Format(time.RFC3339) {
+		t.Fatalf("resets_at = %v, want %s", progress["resets_at"], wantReset.Format(time.RFC3339))
+	}
+}
+
+func TestResolveAccountUsageAcceptsZeroWithoutConfirmation(t *testing.T) {
+	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	raw := json.RawMessage(`{"five_hour":{"utilization":0,"resets_at":"2026-07-31T14:00:00Z","utilization_pending_confirmation":true}}`)
+
+	payload, activeWindows, ok := resolveAccountUsageWindows(raw, now, false)
+	if !ok || len(activeWindows) != 1 {
+		t.Fatalf("resolved=%t active_windows=%d, want true and 1", ok, len(activeWindows))
+	}
+	progress := payload["five_hour"].(map[string]any)
+	if progress["utilization"] != float64(0) {
+		t.Fatalf("utilization = %v, want 0", progress["utilization"])
+	}
+	if _, exists := progress["utilization_pending_confirmation"]; exists {
+		t.Fatalf("legacy pending-zero marker remains: %#v", progress)
 	}
 }

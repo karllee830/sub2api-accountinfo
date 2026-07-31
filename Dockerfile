@@ -10,9 +10,7 @@ FROM alpine:3.22
 
 RUN apk add --no-cache ca-certificates su-exec \
     && addgroup -S app \
-    && adduser -S -G app -u 10001 app \
-    && mkdir -p /app/data \
-    && chown app:app /app/data
+    && adduser -S -G app -u 10001 app
 COPY --from=builder /out/sub2api-accountinfo /usr/local/bin/sub2api-accountinfo
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh

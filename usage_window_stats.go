@@ -7,21 +7,16 @@ import (
 	"math"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
 const (
-	initialUsageLogPageSize      = 200
-	maxUsageBoundaryRecords      = 100000
-	usageZeroConfirmationDelay   = autoResetAccountScanInterval
-	usageZeroPendingPayloadField = "utilization_pending_confirmation"
-	userStatsUnavailableField    = "user_window_stats_unavailable"
-	resetTimePendingField        = "reset_time_pending"
+	initialUsageLogPageSize   = 200
+	maxUsageBoundaryRecords   = 100000
+	userStatsUnavailableField = "user_window_stats_unavailable"
+	resetTimePendingField     = "reset_time_pending"
 )
 
 type usageWindowDefinition struct {
@@ -33,230 +28,6 @@ type usageWindowDefinition struct {
 var usageWindowDefinitions = []usageWindowDefinition{
 	{usageKey: "five_hour", stateKey: "5h", duration: 5 * time.Hour},
 	{usageKey: "seven_day", stateKey: "7d", duration: 7 * 24 * time.Hour},
-}
-
-type usageWindowState struct {
-	StartAt            time.Time  `json:"start_at"`
-	ResetAt            time.Time  `json:"reset_at"`
-	LastUtilization    *float64   `json:"last_utilization,omitempty"`
-	PendingZeroSince   *time.Time `json:"pending_zero_since,omitempty"`
-	PendingZeroResetAt *time.Time `json:"pending_zero_reset_at,omitempty"`
-}
-
-// usageWindowStateStore 保存 accountinfo 已识别的窗口起点和 0% 确认状态。
-// 这里只保存账号 ID、窗口、利用率和时间，不保存用户 token 或 usage log。
-type usageWindowStateStore struct {
-	mutex   sync.Mutex
-	path    string
-	entries map[string]usageWindowState
-}
-
-func newUsageWindowStateStore(path string) *usageWindowStateStore {
-	store := &usageWindowStateStore{
-		path:    strings.TrimSpace(path),
-		entries: make(map[string]usageWindowState),
-	}
-	if store.path == "" {
-		return store
-	}
-
-	data, err := os.ReadFile(store.path)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			log.Printf("usage window state load failed: %v", err)
-		}
-		return store
-	}
-	if err := json.Unmarshal(data, &store.entries); err != nil {
-		log.Printf("usage window state parse failed: %v", err)
-		store.entries = make(map[string]usageWindowState)
-	}
-	return store
-}
-
-func (store *usageWindowStateStore) resolve(
-	accountID int64,
-	definition usageWindowDefinition,
-	resetAt, suggestedStart, now time.Time,
-) (time.Time, bool) {
-	startAt, _, ok := store.resolveObserved(
-		accountID,
-		definition,
-		resetAt,
-		suggestedStart,
-		now,
-		0,
-		false,
-	)
-	return startAt, ok
-}
-
-func (store *usageWindowStateStore) resolveObserved(
-	accountID int64,
-	definition usageWindowDefinition,
-	resetAt, suggestedStart, now time.Time,
-	utilization float64,
-	hasUtilization bool,
-) (time.Time, bool, bool) {
-	if store == nil || accountID <= 0 || resetAt.IsZero() || !resetAt.After(now) {
-		return time.Time{}, false, false
-	}
-
-	key := strconv.FormatInt(accountID, 10) + ":" + definition.stateKey
-	store.mutex.Lock()
-	defer store.mutex.Unlock()
-
-	existing, exists := store.entries[key]
-	startAt := suggestedStart
-	if exists && existing.ResetAt.Equal(resetAt) &&
-		existing.StartAt.Before(now) && existing.StartAt.Before(existing.ResetAt) {
-		startAt = existing.StartAt.UTC()
-	} else if startAt.IsZero() || !startAt.Before(now) || !startAt.Before(resetAt) {
-		startAt = resetAt.Add(-definition.duration)
-	}
-	if !startAt.Before(now) || !startAt.Before(resetAt) {
-		return time.Time{}, false, false
-	}
-
-	entry := existing
-	dirty := !exists || !entry.StartAt.Equal(startAt) || !entry.ResetAt.Equal(resetAt)
-	entry.StartAt = startAt.UTC()
-	entry.ResetAt = resetAt.UTC()
-	pendingZero := false
-
-	if hasUtilization && utilization >= 0 {
-		previousWindowStillActive := exists && existing.ResetAt.After(now)
-		previousUtilizationWasNonZero := existing.LastUtilization != nil && *existing.LastUtilization > 0
-		if utilization == 0 && previousWindowStillActive && previousUtilizationWasNonZero {
-			samePendingZero := existing.PendingZeroSince != nil &&
-				existing.PendingZeroResetAt != nil &&
-				existing.PendingZeroResetAt.Equal(resetAt)
-			if samePendingZero && !now.Before(existing.PendingZeroSince.Add(usageZeroConfirmationDelay)) {
-				dirty = setUsageWindowUtilization(&entry, 0) || dirty
-				dirty = clearPendingUsageZero(&entry) || dirty
-			} else {
-				pendingZero = true
-				if !samePendingZero {
-					observedAt := now.UTC()
-					observedResetAt := resetAt.UTC()
-					entry.PendingZeroSince = &observedAt
-					entry.PendingZeroResetAt = &observedResetAt
-					dirty = true
-				}
-			}
-		} else {
-			dirty = setUsageWindowUtilization(&entry, utilization) || dirty
-			dirty = clearPendingUsageZero(&entry) || dirty
-		}
-	}
-
-	store.entries[key] = entry
-	if dirty {
-		if err := store.persistLocked(); err != nil {
-			log.Printf("usage window state save failed: %v", err)
-		}
-	}
-	return entry.StartAt, pendingZero, true
-}
-
-// activeResetForUnexpectedZero keeps the last known active window when OpenAI
-// temporarily reports 0% together with an already-expired or missing reset time.
-func (store *usageWindowStateStore) activeResetForUnexpectedZero(
-	accountID int64,
-	definition usageWindowDefinition,
-	now time.Time,
-	utilization float64,
-	hasUtilization bool,
-) (time.Time, bool) {
-	if store == nil || accountID <= 0 || !hasUtilization || utilization != 0 {
-		return time.Time{}, false
-	}
-
-	key := strconv.FormatInt(accountID, 10) + ":" + definition.stateKey
-	store.mutex.Lock()
-	defer store.mutex.Unlock()
-
-	existing, exists := store.entries[key]
-	if !exists || existing.LastUtilization == nil || *existing.LastUtilization <= 0 ||
-		!existing.ResetAt.After(now) || !existing.StartAt.Before(now) {
-		return time.Time{}, false
-	}
-	return existing.ResetAt.UTC(), true
-}
-
-func setUsageWindowUtilization(entry *usageWindowState, utilization float64) bool {
-	if entry.LastUtilization != nil && *entry.LastUtilization == utilization {
-		return false
-	}
-	value := utilization
-	entry.LastUtilization = &value
-	return true
-}
-
-func clearPendingUsageZero(entry *usageWindowState) bool {
-	if entry.PendingZeroSince == nil && entry.PendingZeroResetAt == nil {
-		return false
-	}
-	entry.PendingZeroSince = nil
-	entry.PendingZeroResetAt = nil
-	return true
-}
-
-func (store *usageWindowStateStore) invalidateAccount(accountID int64) {
-	if store == nil || accountID <= 0 {
-		return
-	}
-	store.mutex.Lock()
-	defer store.mutex.Unlock()
-
-	dirty := false
-	for _, definition := range usageWindowDefinitions {
-		key := strconv.FormatInt(accountID, 10) + ":" + definition.stateKey
-		if _, exists := store.entries[key]; exists {
-			delete(store.entries, key)
-			dirty = true
-		}
-	}
-	if dirty {
-		if err := store.persistLocked(); err != nil {
-			log.Printf("usage window state save failed: %v", err)
-		}
-	}
-}
-
-func (store *usageWindowStateStore) persistLocked() error {
-	if store.path == "" {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(store.path), 0o750); err != nil {
-		return err
-	}
-
-	temporary, err := os.CreateTemp(filepath.Dir(store.path), ".usage-window-state-*.tmp")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	defer func() { _ = os.Remove(temporaryPath) }()
-	if err := temporary.Chmod(0o600); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-
-	encoder := json.NewEncoder(temporary)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(store.entries); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	return os.Rename(temporaryPath, store.path)
 }
 
 type usageLogPage struct {
@@ -310,12 +81,7 @@ func (a *app) enrichAccountUsageForUser(
 		return data
 	}
 
-	payload, activeWindows, ok := a.resolveAccountUsageWindowsWithOptions(
-		accountID,
-		data,
-		now,
-		allowProvisionalWindows,
-	)
+	payload, activeWindows, ok := resolveAccountUsageWindows(data, now, allowProvisionalWindows)
 	if !ok {
 		return data
 	}
@@ -328,7 +94,7 @@ func (a *app) enrichAccountUsageForUser(
 			userID:      userID,
 			accountID:   accountID,
 			windowKey:   window.stateKey,
-			windowStart: window.startAt.UnixNano(),
+			windowStart: window.startAt.Unix(),
 			provisional: window.provisional,
 		}
 		if window.provisional {
@@ -354,7 +120,7 @@ func (a *app) enrichAccountUsageForUser(
 		}
 		delete(window.progress, userStatsUnavailableField)
 		window.progress["user_window_stats"] = stats
-		if pending, _ := window.progress[usageZeroPendingPayloadField].(bool); pending || window.provisional {
+		if window.provisional {
 			delete(window.progress, "user_utilization")
 			delete(window.progress, "user_utilization_estimated")
 			continue
@@ -378,23 +144,15 @@ func (a *app) enrichAccountUsageForUser(
 	return marshalUsagePayload(payload, data)
 }
 
-func (a *app) resolveAccountUsageWindows(
-	accountID int64,
-	data json.RawMessage,
-	now time.Time,
-) (map[string]any, []activeUsageWindow, bool) {
-	return a.resolveAccountUsageWindowsWithOptions(accountID, data, now, false)
-}
-
-func (a *app) resolveAccountUsageWindowsWithOptions(
-	accountID int64,
+func resolveAccountUsageWindows(
 	data json.RawMessage,
 	now time.Time,
 	allowProvisionalWindows bool,
 ) (map[string]any, []activeUsageWindow, bool) {
-	if len(data) == 0 || accountID <= 0 || a.usageWindowState == nil {
+	if len(data) == 0 {
 		return nil, nil, false
 	}
+	now = now.UTC()
 
 	var payload map[string]any
 	if err := json.Unmarshal(data, &payload); err != nil || payload == nil {
@@ -407,56 +165,28 @@ func (a *app) resolveAccountUsageWindowsWithOptions(
 		if !ok || progress == nil {
 			continue
 		}
-		utilization, hasUtilization := numberValue(progress["utilization"])
-		resetAt, hasActiveReset := parseUsageTimestamp(progress["resets_at"])
-		hasActiveReset = hasActiveReset && resetAt.After(now)
+		delete(progress, "utilization_pending_confirmation")
+		resetAt, hasActiveReset := activeUsageWindowReset(progress, definition.duration, now)
 		if !hasActiveReset {
-			preservedResetAt, preserved := a.usageWindowState.activeResetForUnexpectedZero(
-				accountID,
-				definition,
-				now,
-				utilization,
-				hasUtilization,
-			)
-			if preserved {
-				resetAt = preservedResetAt
-				progress["resets_at"] = resetAt.Format(time.RFC3339)
-				progress["remaining_seconds"] = int(resetAt.Sub(now).Seconds())
-			} else if allowProvisionalWindows {
-				startAt := now.Add(-definition.duration).UTC()
-				progress["window_start_at"] = startAt.Format(time.RFC3339)
-				progress[resetTimePendingField] = true
-				delete(progress, usageZeroPendingPayloadField)
-				activeWindows = append(activeWindows, activeUsageWindow{
-					progress:    progress,
-					stateKey:    definition.stateKey,
-					startAt:     startAt,
-					provisional: true,
-				})
-				continue
-			} else {
+			if !allowProvisionalWindows {
 				continue
 			}
-		}
-		delete(progress, resetTimePendingField)
-		suggestedStart, _ := parseUsageTimestamp(progress["window_start_at"])
-		startAt, pendingZero, ok := a.usageWindowState.resolveObserved(
-			accountID,
-			definition,
-			resetAt,
-			suggestedStart,
-			now,
-			utilization,
-			hasUtilization,
-		)
-		if !ok {
+			startAt := now.Add(-definition.duration)
+			progress["window_start_at"] = startAt.Format(time.RFC3339)
+			progress[resetTimePendingField] = true
+			activeWindows = append(activeWindows, activeUsageWindow{
+				progress:    progress,
+				stateKey:    definition.stateKey,
+				startAt:     startAt,
+				provisional: true,
+			})
 			continue
 		}
-		if pendingZero {
-			progress[usageZeroPendingPayloadField] = true
-		} else {
-			delete(progress, usageZeroPendingPayloadField)
-		}
+
+		startAt := resetAt.Add(-definition.duration)
+		delete(progress, resetTimePendingField)
+		progress["resets_at"] = resetAt.Format(time.RFC3339)
+		progress["remaining_seconds"] = int64(math.Ceil(resetAt.Sub(now).Seconds()))
 		progress["window_start_at"] = startAt.Format(time.RFC3339)
 		activeWindows = append(activeWindows, activeUsageWindow{
 			progress: progress,
@@ -466,6 +196,26 @@ func (a *app) resolveAccountUsageWindowsWithOptions(
 	}
 
 	return payload, activeWindows, true
+}
+
+// activeUsageWindowReset accepts the absolute reset time when present and falls
+// back to the provider's remaining duration. The window start is always derived
+// as resetAt-windowDuration, so no local reset-window state is required.
+func activeUsageWindowReset(progress map[string]any, duration time.Duration, now time.Time) (time.Time, bool) {
+	if resetAt, ok := parseUsageTimestamp(progress["resets_at"]); ok {
+		resetAt = resetAt.UTC()
+		startAt := resetAt.Add(-duration)
+		if resetAt.After(now) && !startAt.After(now) {
+			return resetAt, true
+		}
+	}
+
+	remainingSeconds, ok := numberValue(progress["remaining_seconds"])
+	if !ok || remainingSeconds <= 0 || remainingSeconds > duration.Seconds() {
+		return time.Time{}, false
+	}
+	resetAt := now.Add(time.Duration(math.Ceil(remainingSeconds)) * time.Second).UTC()
+	return resetAt, true
 }
 
 // fetchUserWindowStats uses Sub2API's aggregate endpoint for the bulk of a

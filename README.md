@@ -29,7 +29,6 @@ cp .env.example .env
 | `TRUST_PROXY_HEADERS` | 否 | 是否信任反代传入的客户端 IP，默认 `true`；用于保持 Sub2API Token 的 IP/UA 会话绑定 |
 | `FRAME_ANCESTORS` | 否 | CSP `frame-ancestors` 来源列表；默认使用 `SUB2API_URL` 的 origin |
 | `LISTEN_ADDR` | 否 | 容器内监听地址，默认 `:8080` |
-| `USAGE_WINDOW_STATE_PATH` | 否 | 5h/7d 窗口起点持久化文件，默认 `/app/data/usage-window-state.json` |
 | `HOST_PORT` | 否 | Docker Compose 映射到宿主机的端口，默认 `8080` |
 
 `SUB2API_ADMIN_API_KEY` 可在 Sub2API 管理后台的“设置 → 安全 → Admin API Key”中生成。完整 Key 只在生成时显示一次。
@@ -45,8 +44,7 @@ cp .env.example .env
 
 设置 `AUTO_RESET_CREDITS=true` 后：
 
-- 后台每 15 分钟扫描一次 Sub2API 中所有 `active` 的 OpenAI OAuth 母账号，明确排除 Spark 等影子账号；同一轮会强制刷新账号用量并持久化最新 5h/7d 窗口起点，单个账号查询失败时保留已有窗口记录；新增账号最多等待下一次扫描，不会等待 6 小时额度刷新；
-- 已有非零利用率突然变成 0% 时先显示“复核中”，不会立即把 OpenAI 的单次异常结果当成真实归零；间隔 15 分钟后仍为 0% 才确认，期间恢复非零则立即取消待确认状态。正常窗口到期或本项目重置成功后的 0% 会直接接受；
+- 后台每 15 分钟扫描一次 Sub2API 中所有 `active` 的 OpenAI OAuth 母账号，明确排除 Spark 等影子账号；新增账号最多等待下一次扫描，不会等待 6 小时额度刷新；
 - 使用 `chatgpt_account_id`（旧账号回退 `organization_id`）识别底层 OpenAI 账号；多个非影子 Sub2API 账号 ID 指向同一 OpenAI 账号时只调度其中一个；
 - 新发现的账号按每批最多 8 个、批次间隔 30 秒进行首次额度查询，避免容器启动时集中请求，同时防止账号较多时长时间排队；
 - 成功的额度查询缓存 15 分钟，失败结果缓存 5 分钟；前端查询按钮和后台任务共享缓存；
@@ -55,7 +53,9 @@ cp .env.example .env
 - 当前项目中的手动重置和自动重置按底层 OpenAI 账号身份串行处理，即使来自不同 Sub2API 账号 ID 也会阻止一分钟内重复提交；
 - 自动任务独立于 `ALLOW_RESET` 和用户属性，因为它使用服务端 Admin API Key 对全局账号执行；启用后所有用户页面都会显示“自动重置已开启”说明。
 
-调度状态保存在内存中，容器重启后会重新扫描并建立定时任务。重置成功后 2 分钟会检查是否还有其他即将到期的次数；普通查询失败后 30 分钟再试，到期前的最终确认失败时会在 5 分钟后重试，且不会对同一次重置请求立即连续提交。
+5 小时和 7 天窗口起点不再持久化：页面查询用量时，程序直接使用 Sub2API 返回的下一次重置时间（或剩余秒数）减去对应窗口时长计算。未获取到重置时间时，OpenAI OAuth 账号仍会临时统计最近 5 小时或 7 天的用户消费金额，但不估算用户用量占比，并提示稍后再查看。
+
+自动重置调度状态保存在内存中，容器重启后会重新扫描并建立定时任务。重置成功后 2 分钟会检查是否还有其他即将到期的次数；普通查询失败后 30 分钟再试，到期前的最终确认失败时会在 5 分钟后重试，且不会对同一次重置请求立即连续提交。
 
 部署和外部操作边界：
 
@@ -88,7 +88,6 @@ proxy_set_header User-Agent $http_user_agent;
 直接使用 Docker Hub 镜像：
 
 ```bash
-mkdir -p data
 docker pull karllee830/sub2api-accountinfo:latest
 docker compose up -d
 ```
@@ -105,8 +104,6 @@ CONTAINER_IMAGE=ghcr.io/karllee830/sub2api-accountinfo:latest docker compose up 
 ```bash
 docker compose up -d --build
 ```
-
-accountinfo 会把已识别的账号 5h/7d 窗口起点保存到宿主机的 `./data/usage-window-state.json`。Compose 使用目录映射 `./data:/app/data`，所以普通容器重启、重新创建容器或更新镜像不会丢失该文件；只有删除或清空宿主机 `data` 目录才会丢失窗口记录。
 
 健康检查地址为 `GET /healthz`，不需要用户 Token。
 

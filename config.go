@@ -11,21 +11,19 @@ import (
 )
 
 const (
-	defaultListenAddr           = ":8080"
-	defaultUsageWindowStatePath = "/app/data/usage-window-state.json"
-	maxUpstreamBody             = 2 << 20
+	defaultListenAddr = ":8080"
+	maxUpstreamBody   = 2 << 20
 )
 
 type config struct {
-	sub2APIURL           *url.URL
-	adminAPIKey          string
-	allowReset           bool
-	autoResetCredits     bool
-	trustProxyHeaders    bool
-	frameAncestors       string
-	listenAddr           string
-	usageWindowStatePath string
-	requestTimeout       time.Duration
+	sub2APIURL        *url.URL
+	adminAPIKey       string
+	allowReset        bool
+	autoResetCredits  bool
+	trustProxyHeaders bool
+	frameAncestors    string
+	listenAddr        string
+	requestTimeout    time.Duration
 }
 
 func loadConfig() (config, error) {
@@ -60,21 +58,15 @@ func loadConfig() (config, error) {
 	if listenAddr == "" {
 		listenAddr = defaultListenAddr
 	}
-	usageWindowStatePath := strings.TrimSpace(os.Getenv("USAGE_WINDOW_STATE_PATH"))
-	if usageWindowStatePath == "" {
-		usageWindowStatePath = defaultUsageWindowStatePath
-	}
-
 	return config{
-		sub2APIURL:           sub2APIURL,
-		adminAPIKey:          adminAPIKey,
-		allowReset:           allowReset,
-		autoResetCredits:     autoResetCredits,
-		trustProxyHeaders:    trustProxyHeaders,
-		frameAncestors:       frameAncestors,
-		listenAddr:           listenAddr,
-		usageWindowStatePath: usageWindowStatePath,
-		requestTimeout:       30 * time.Second,
+		sub2APIURL:        sub2APIURL,
+		adminAPIKey:       adminAPIKey,
+		allowReset:        allowReset,
+		autoResetCredits:  autoResetCredits,
+		trustProxyHeaders: trustProxyHeaders,
+		frameAncestors:    frameAncestors,
+		listenAddr:        listenAddr,
+		requestTimeout:    30 * time.Second,
 	}, nil
 }
 

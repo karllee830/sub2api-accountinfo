@@ -182,7 +182,6 @@ func (a *app) performOpenAIQuotaReset(ctx context.Context, accountID int64, out 
 	)
 	if upstreamErr == nil {
 		a.quotaCache.invalidate(accountID)
-		a.usageWindowState.invalidateAccount(accountID)
 	}
 	return upstreamErr
 }
