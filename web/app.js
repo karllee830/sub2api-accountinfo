@@ -229,6 +229,29 @@
     }
   }
 
+  function windowDisplayUtilization(usage) {
+    if (usage?.utilization_pending_confirmation === true) {
+      return {
+        value: null,
+        isUserScoped: false,
+        isPending: true
+      }
+    }
+    const userUtilization = Number(usage?.user_utilization)
+    if (Number.isFinite(userUtilization) && userUtilization >= 0) {
+      return {
+        value: Math.max(0, Math.min(100, userUtilization)),
+        isUserScoped: true,
+        isPending: false
+      }
+    }
+    return {
+      value: Math.max(0, Math.min(100, Number(usage?.utilization) || 0)),
+      isUserScoped: false,
+      isPending: false
+    }
+  }
+
   function formatDate(value) {
     const date = new Date(value)
     if (Number.isNaN(date.getTime())) return String(value || '-')
@@ -306,7 +329,15 @@
     labelNode.textContent = label
     const valueNode = document.createElement('span')
     valueNode.className = 'window-value'
-    valueNode.textContent = formatPercent(usage.utilization)
+    const displayUtilization = windowDisplayUtilization(usage)
+    valueNode.textContent = displayUtilization.isPending ? '复核中' : formatPercent(displayUtilization.value)
+    if (displayUtilization.isPending) {
+      valueNode.title = 'OpenAI 暂时返回 0%，等待下一轮扫描确认'
+    } else if (displayUtilization.isUserScoped) {
+      valueNode.title = usage.user_utilization_estimated
+        ? '按账号用量和当前用户消费占比估算'
+        : '当前用户在此用量窗口中的使用率'
+    }
     header.append(labelNode, valueNode)
 
     const track = document.createElement('div')
@@ -314,27 +345,32 @@
     track.setAttribute('role', 'progressbar')
     track.setAttribute('aria-valuemin', '0')
     track.setAttribute('aria-valuemax', '100')
-    const utilization = Math.max(0, Math.min(100, Number(usage.utilization) || 0))
-    track.setAttribute('aria-valuenow', String(utilization))
+    const utilization = displayUtilization.value
+    if (displayUtilization.isPending) {
+      track.classList.add('is-pending')
+      track.setAttribute('aria-valuetext', 'OpenAI 用量数据复核中')
+    } else {
+      track.setAttribute('aria-valuenow', String(utilization))
+    }
     const bar = document.createElement('div')
     bar.className = 'progress-bar'
-    bar.style.width = `${utilization}%`
+    bar.style.width = displayUtilization.isPending ? '0%' : `${utilization}%`
     track.append(bar)
 
     const footer = document.createElement('div')
     footer.className = 'window-footer'
     const stats = document.createElement('div')
     stats.className = 'window-stats'
-    const windowStats = usage.window_stats
+    if (displayUtilization.isPending) {
+      stats.append(createChip('OpenAI 暂时返回 0%，等待确认', 'stat-chip stat-chip-warning'))
+    }
+    const windowStats = displayUtilization.isPending ? null : usage.window_stats
     if (windowStats) {
       stats.append(
         createChip(`请求 ${formatCompact(windowStats.requests)}`),
         createChip(`令牌 ${formatCompact(windowStats.tokens)}`),
         createChip(`账号消费 $${formatMoney(windowStats.cost)}`)
       )
-      if (windowStats.user_cost !== undefined && windowStats.user_cost !== null) {
-        stats.append(createChip(`用户消费 $${formatMoney(windowStats.user_cost)}`))
-      }
       const budget = estimateWindowBudget(usage)
       if (budget) {
         stats.append(
@@ -342,6 +378,10 @@
           createChip(`推算剩余 $${formatMoney(budget.remaining)}`, 'stat-chip stat-chip-estimate stat-chip-estimate-remaining')
         )
       }
+    }
+    const userWindowStats = usage.user_window_stats
+    if (userWindowStats && userWindowStats.cost !== undefined && userWindowStats.cost !== null) {
+      stats.append(createChip(`当前用户消费 $${formatMoney(userWindowStats.cost)}`))
     }
     const reset = document.createElement('span')
     reset.className = 'reset-time'

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -173,7 +174,7 @@ func (a *app) loadDashboard(ctx context.Context, userID int64, active bool) (*da
 		}
 		groups[index].Accounts = accounts
 	}
-	a.loadAccountUsage(ctx, groups, active)
+	a.loadAccountUsage(ctx, groups, userID, active)
 	accountIDs := make(map[int64]struct{})
 	for _, group := range groups {
 		for _, account := range group.Accounts {
@@ -282,7 +283,7 @@ func (a *app) listGroupAccounts(ctx context.Context, groupID int64) ([]accountVi
 	return accounts, nil
 }
 
-func (a *app) loadAccountUsage(ctx context.Context, groups []dashboardGroup, active bool) {
+func (a *app) loadAccountUsage(ctx context.Context, groups []dashboardGroup, userID int64, active bool) {
 	accountIDs := make(map[int64]struct{})
 	for _, group := range groups {
 		for _, account := range group.Accounts {
@@ -310,13 +311,10 @@ func (a *app) loadAccountUsage(ctx context.Context, groups []dashboardGroup, act
 			}
 			defer func() { <-semaphore }()
 
-			query := url.Values{}
-			if active {
-				query.Set("source", "active")
-				query.Set("force", "true")
+			data, upstreamErr := a.queryAccountUsage(ctx, accountID, active)
+			if upstreamErr == nil {
+				data = a.enrichAccountUsageForUser(ctx, accountID, userID, data, time.Now().UTC())
 			}
-			var data json.RawMessage
-			upstreamErr := a.doAdminRequest(ctx, http.MethodGet, "/admin/accounts/"+strconv.FormatInt(accountID, 10)+"/usage", query, &data)
 			result := usageResult{data: data}
 			if upstreamErr != nil {
 				result.err = upstreamErr.Message
@@ -335,6 +333,23 @@ func (a *app) loadAccountUsage(ctx context.Context, groups []dashboardGroup, act
 			groups[groupIndex].Accounts[accountIndex].UsageError = result.err
 		}
 	}
+}
+
+func (a *app) queryAccountUsage(ctx context.Context, accountID int64, active bool) (json.RawMessage, *upstreamAPIError) {
+	query := url.Values{}
+	if active {
+		query.Set("source", "active")
+		query.Set("force", "true")
+	}
+	var data json.RawMessage
+	upstreamErr := a.doAdminRequest(
+		ctx,
+		http.MethodGet,
+		"/admin/accounts/"+strconv.FormatInt(accountID, 10)+"/usage",
+		query,
+		&data,
+	)
+	return data, upstreamErr
 }
 
 func (a *app) userCanAccessAccount(ctx context.Context, userID, accountID int64) (bool, *requestError) {

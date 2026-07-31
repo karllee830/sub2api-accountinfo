@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -43,6 +44,8 @@ func writeUpstream(response http.ResponseWriter, status int, data string) {
 }
 
 func TestDashboardAuthenticatesUserAndLoadsSubscribedAccountUsage(t *testing.T) {
+	resetAt := time.Now().UTC().Add(2 * time.Hour).Truncate(time.Second)
+	createdAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/api/v1/auth/me":
@@ -82,7 +85,13 @@ func TestDashboardAuthenticatesUserAndLoadsSubscribedAccountUsage(t *testing.T) 
 			if request.URL.Query().Get("source") != "active" || request.URL.Query().Get("force") != "true" {
 				t.Errorf("usage query = %q", request.URL.RawQuery)
 			}
-			writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":{"updated_at":"2026-07-17T12:00:00Z","five_hour":{"utilization":25}}}`)
+			writeUpstream(response, http.StatusOK, fmt.Sprintf(`{"code":0,"message":"success","data":{"updated_at":"2026-07-17T12:00:00Z","five_hour":{"utilization":25,"resets_at":%q,"window_stats":{"requests":4,"tokens":100,"cost":10}}}}`, resetAt.Format(time.RFC3339)))
+		case "/api/v1/admin/usage":
+			assertAdminRequest(t, request)
+			if request.URL.Query().Get("user_id") != "2" || request.URL.Query().Get("account_id") != "14" {
+				t.Errorf("usage log query = %q", request.URL.RawQuery)
+			}
+			writeUpstream(response, http.StatusOK, fmt.Sprintf(`{"code":0,"message":"success","data":{"items":[{"user_id":2,"input_tokens":10,"output_tokens":5,"cache_creation_tokens":2,"cache_read_tokens":3,"actual_cost":2.5,"created_at":%q}],"total":1,"page":1,"page_size":1000,"pages":1}}`, createdAt.Format(time.RFC3339)))
 		default:
 			t.Fatalf("unexpected upstream path %s", request.URL.Path)
 		}
@@ -112,6 +121,11 @@ func TestDashboardAuthenticatesUserAndLoadsSubscribedAccountUsage(t *testing.T) 
 	}
 	if !strings.Contains(string(accounts[0].Usage), `"utilization":25`) {
 		t.Fatalf("unexpected usage: %s", accounts[0].Usage)
+	}
+	for _, expected := range []string{`"window_start_at"`, `"user_window_stats"`, `"cost":2.5`, `"user_utilization":6.25`} {
+		if !strings.Contains(string(accounts[0].Usage), expected) {
+			t.Fatalf("usage is missing %q: %s", expected, accounts[0].Usage)
+		}
 	}
 	if strings.Contains(response.Body.String(), "must-not-leak") {
 		t.Fatal("account credentials leaked to dashboard response")
@@ -432,10 +446,14 @@ func TestUsageWindowStatsUseChineseLabelsAndBudgetEstimate(t *testing.T) {
 		"请求 ${formatCompact(windowStats.requests)}",
 		"令牌 ${formatCompact(windowStats.tokens)}",
 		"账号消费 $${formatMoney(windowStats.cost)}",
-		"用户消费 $${formatMoney(windowStats.user_cost)}",
+		"当前用户消费 $${formatMoney(userWindowStats.cost)}",
+		"usage.user_utilization",
 		"推算总额度 $${formatMoney(budget.total)}",
 		"推算剩余 $${formatMoney(budget.remaining)}",
 		"const total = spent / (utilization / 100)",
+		"usage?.utilization_pending_confirmation === true",
+		"OpenAI 暂时返回 0%，等待确认",
+		"valueNode.textContent = displayUtilization.isPending ? '复核中'",
 	} {
 		if !strings.Contains(content, text) {
 			t.Fatalf("usage window display rule is missing %q", text)
