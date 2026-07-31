@@ -386,6 +386,22 @@ func TestQuotaPanelShowsEveryCreditExpiration(t *testing.T) {
 	}
 }
 
+func TestQuotaButtonOnlyTargetsOAuthAccountsWithUsageWindows(t *testing.T) {
+	script, err := webFiles.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(script)
+	for _, text := range []string{
+		"account.platform !== 'openai' || account.type !== 'oauth'",
+		"if (rendered > 0) renderAccountActions(card, account, allowReset)",
+	} {
+		if !strings.Contains(content, text) {
+			t.Fatalf("quota button visibility rule is missing %q", text)
+		}
+	}
+}
+
 func TestAutoResetEnabledBanner(t *testing.T) {
 	script, err := webFiles.ReadFile("web/app.js")
 	if err != nil {

@@ -432,7 +432,7 @@
   }
 
   function renderAccountActions(container, account, allowReset) {
-    if (account.platform !== 'openai') return
+    if (account.platform !== 'openai' || account.type !== 'oauth') return
 
     const actionRow = document.createElement('div')
     actionRow.className = 'account-actions'
@@ -578,7 +578,7 @@
     }
 
     card.append(header, meta, windows)
-    renderAccountActions(card, account, allowReset)
+    if (rendered > 0) renderAccountActions(card, account, allowReset)
     return card
   }
 
