@@ -735,10 +735,14 @@
     icon.setAttribute('aria-hidden', 'true')
     icon.textContent = '◷'
     const copy = document.createElement('div')
+    copy.className = 'auto-reset-banner-copy'
+    const intro = document.createElement('div')
+    intro.className = 'auto-reset-banner-intro'
     const title = document.createElement('strong')
     title.textContent = '自动重置已开启'
     const description = document.createElement('p')
     description.textContent = '系统会在重置额度到期前 10 分钟自动使用。'
+    intro.append(title, description)
 
     const schedulePanel = document.createElement('div')
     schedulePanel.className = 'auto-reset-schedule'
@@ -779,7 +783,7 @@
       schedulePanel.append(empty)
     }
 
-    copy.append(title, description, schedulePanel)
+    copy.append(intro, schedulePanel)
     banner.append(icon, copy)
     return banner
   }

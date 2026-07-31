@@ -519,6 +519,25 @@ func TestThemeUsesSolidWarmPalette(t *testing.T) {
 	}
 }
 
+func TestDesktopLayoutUsesWideCompactCanvas(t *testing.T) {
+	stylesheet, err := webFiles.ReadFile("web/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(stylesheet)
+	for _, text := range []string{
+		"width: min(100%, 1440px);",
+		"@media (min-width: 1180px)",
+		".auto-reset-banner-copy",
+		"grid-template-columns: minmax(230px, 0.72fr) minmax(0, 1.28fr);",
+		"grid-template-columns: 1.45fr 0.95fr 0.72fr;",
+	} {
+		if !strings.Contains(content, text) {
+			t.Fatalf("wide desktop layout is missing %q", text)
+		}
+	}
+}
+
 func TestAutoResetEnabledBanner(t *testing.T) {
 	script, err := webFiles.ReadFile("web/app.js")
 	if err != nil {
