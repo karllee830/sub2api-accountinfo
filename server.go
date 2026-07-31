@@ -16,6 +16,7 @@ type app struct {
 	config           config
 	client           *http.Client
 	quotaCache       *accountQuotaCache
+	usageWindowState *usageWindowStateStore
 	resetCoordinator *accountResetCoordinator
 	autoResetPlans   *autoResetScheduleStore
 }
@@ -24,6 +25,7 @@ func newApp(cfg config) *app {
 	return &app{
 		config:           cfg,
 		quotaCache:       newAccountQuotaCache(),
+		usageWindowState: newUsageWindowStateStore(cfg.usageWindowStatePath),
 		resetCoordinator: newAccountResetCoordinator(),
 		autoResetPlans:   newAutoResetScheduleStore(),
 		client: &http.Client{

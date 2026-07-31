@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -47,6 +48,9 @@ func TestAutoResetWorkerUsesCreditAtLeadTimeWithoutFrequentQuotaQueries(t *testi
 			}`)
 		case "/api/v1/admin/accounts/14":
 			writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":{"id":14,"platform":"openai","type":"oauth","status":"active"}}`)
+		case "/api/v1/admin/accounts/14/usage":
+			assertActiveUsageQuery(t, request)
+			writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":{}}`)
 		case "/api/v1/admin/openai/accounts/14/quota":
 			quotaQueries.Add(1)
 			writeUpstream(
@@ -163,6 +167,9 @@ func TestAutoResetWorkerSkipsCreditConsumedDirectlyInSub2API(t *testing.T) {
 			}`)
 		case "/api/v1/admin/accounts/14":
 			writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":{"id":14,"platform":"openai","type":"oauth","status":"active"}}`)
+		case "/api/v1/admin/accounts/14/usage":
+			assertActiveUsageQuery(t, request)
+			writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":{}}`)
 		case "/api/v1/admin/openai/accounts/14/quota":
 			if quotaQueries.Add(1) == 1 {
 				writeUpstream(
@@ -235,6 +242,9 @@ func TestAutoResetWorkerSkipsAccountDisabledBeforeTrigger(t *testing.T) {
 			}`)
 		case "/api/v1/admin/accounts/14":
 			writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":{"id":14,"platform":"openai","type":"oauth","status":"inactive"}}`)
+		case "/api/v1/admin/accounts/14/usage":
+			assertActiveUsageQuery(t, request)
+			writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":{}}`)
 		case "/api/v1/admin/openai/accounts/14/quota":
 			quotaQueries.Add(1)
 			writeUpstream(
@@ -572,6 +582,9 @@ func TestAutoResetWorkerDiscoversNewAccountBeforeQuotaRefresh(t *testing.T) {
 		case "/api/v1/admin/openai/accounts/16/quota":
 			account16Queries.Add(1)
 			writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":{"rate_limit_reset_credits":{"available_count":0,"credits":[]}}}`)
+		case "/api/v1/admin/accounts/14/usage", "/api/v1/admin/accounts/16/usage":
+			assertActiveUsageQuery(t, request)
+			writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":{}}`)
 		default:
 			t.Fatalf("unexpected upstream path %s", request.URL.Path)
 		}
@@ -601,6 +614,96 @@ func TestAutoResetWorkerDiscoversNewAccountBeforeQuotaRefresh(t *testing.T) {
 	}
 	if account16Queries.Load() != 1 {
 		t.Fatalf("new account quota queries = %d, want immediate initial query after discovery", account16Queries.Load())
+	}
+}
+
+func TestAutoResetWorkerScansUsageWindowsEveryFifteenMinutesAndKeepsStateOnError(t *testing.T) {
+	start := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	firstResetAt := start.Add(2 * time.Hour)
+	secondResetAt := start.Add(3 * time.Hour)
+	var usageScans atomic.Int32
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/v1/admin/accounts":
+			writeUpstream(response, http.StatusOK, `{
+				"code":0,
+				"message":"success",
+				"data":{
+					"items":[{"id":14,"platform":"openai","type":"oauth","status":"active"}],
+					"total":1,
+					"page":1,
+					"page_size":100,
+					"pages":1
+				}
+			}`)
+		case "/api/v1/admin/accounts/14/usage":
+			assertActiveUsageQuery(t, request)
+			switch usageScans.Add(1) {
+			case 1:
+				writeUpstream(response, http.StatusOK, fmt.Sprintf(
+					`{"code":0,"message":"success","data":{"five_hour":{"utilization":25,"resets_at":%q}}}`,
+					firstResetAt.Format(time.RFC3339),
+				))
+			case 2:
+				writeUpstream(response, http.StatusBadGateway, `{"code":502,"message":"temporary usage failure"}`)
+			default:
+				writeUpstream(response, http.StatusOK, fmt.Sprintf(
+					`{"code":0,"message":"success","data":{"five_hour":{"utilization":30,"resets_at":%q}}}`,
+					secondResetAt.Format(time.RFC3339),
+				))
+			}
+		case "/api/v1/admin/openai/accounts/14/quota":
+			writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":{"rate_limit_reset_credits":{"available_count":0,"credits":[]}}}`)
+		default:
+			t.Fatalf("unexpected upstream path %s", request.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := testConfig(t, upstream.URL)
+	cfg.autoResetCredits = true
+	cfg.usageWindowStatePath = filepath.Join(t.TempDir(), "usage-window-state.json")
+	application := newApp(cfg)
+	currentTime := start
+	application.quotaCache.now = func() time.Time { return currentTime }
+	worker := newAutoResetWorker(application)
+	worker.now = func() time.Time { return currentTime }
+
+	windowState := func() usageWindowState {
+		application.usageWindowState.mutex.Lock()
+		defer application.usageWindowState.mutex.Unlock()
+		return application.usageWindowState.entries["14:5h"]
+	}
+
+	worker.step(context.Background(), currentTime)
+	if usageScans.Load() != 1 || !windowState().ResetAt.Equal(firstResetAt) {
+		t.Fatalf("initial usage scans = %d, state = %#v", usageScans.Load(), windowState())
+	}
+
+	currentTime = start.Add(autoResetAccountScanInterval - time.Minute)
+	worker.step(context.Background(), currentTime)
+	if usageScans.Load() != 1 {
+		t.Fatalf("usage scans before interval = %d, want 1", usageScans.Load())
+	}
+
+	currentTime = start.Add(autoResetAccountScanInterval)
+	worker.step(context.Background(), currentTime)
+	if usageScans.Load() != 2 || !windowState().ResetAt.Equal(firstResetAt) {
+		t.Fatalf("failed scan replaced state: scans=%d state=%#v", usageScans.Load(), windowState())
+	}
+
+	currentTime = start.Add(2 * autoResetAccountScanInterval)
+	worker.step(context.Background(), currentTime)
+	if usageScans.Load() != 3 || !windowState().ResetAt.Equal(secondResetAt) {
+		t.Fatalf("recovered scan did not update state: scans=%d state=%#v", usageScans.Load(), windowState())
+	}
+}
+
+func assertActiveUsageQuery(t *testing.T, request *http.Request) {
+	t.Helper()
+	if request.URL.Query().Get("source") != "active" || request.URL.Query().Get("force") != "true" {
+		t.Errorf("usage query = %q, want active forced refresh", request.URL.RawQuery)
 	}
 }
 

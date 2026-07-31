@@ -29,6 +29,7 @@ cp .env.example .env
 | `TRUST_PROXY_HEADERS` | 否 | 是否信任反代传入的客户端 IP，默认 `true`；用于保持 Sub2API Token 的 IP/UA 会话绑定 |
 | `FRAME_ANCESTORS` | 否 | CSP `frame-ancestors` 来源列表；默认使用 `SUB2API_URL` 的 origin |
 | `LISTEN_ADDR` | 否 | 容器内监听地址，默认 `:8080` |
+| `USAGE_WINDOW_STATE_PATH` | 否 | 5h/7d 窗口起点持久化文件，默认 `/app/data/usage-window-state.json` |
 | `HOST_PORT` | 否 | Docker Compose 映射到宿主机的端口，默认 `8080` |
 
 `SUB2API_ADMIN_API_KEY` 可在 Sub2API 管理后台的“设置 → 安全 → Admin API Key”中生成。完整 Key 只在生成时显示一次。
@@ -44,7 +45,7 @@ cp .env.example .env
 
 设置 `AUTO_RESET_CREDITS=true` 后：
 
-- 后台每 15 分钟扫描一次 Sub2API 中所有 `active` 的 OpenAI OAuth 母账号，明确排除 Spark 等影子账号；新增账号最多等待下一次扫描，不会等待 6 小时额度刷新；
+- 后台每 15 分钟扫描一次 Sub2API 中所有 `active` 的 OpenAI OAuth 母账号，明确排除 Spark 等影子账号；同一轮会强制刷新账号用量并持久化最新 5h/7d 窗口起点，单个账号查询失败时保留已有窗口记录；新增账号最多等待下一次扫描，不会等待 6 小时额度刷新；
 - 使用 `chatgpt_account_id`（旧账号回退 `organization_id`）识别底层 OpenAI 账号；多个非影子 Sub2API 账号 ID 指向同一 OpenAI 账号时只调度其中一个；
 - 新发现的账号按每批最多 8 个、批次间隔 30 秒进行首次额度查询，避免容器启动时集中请求，同时防止账号较多时长时间排队；
 - 成功的额度查询缓存 15 分钟，失败结果缓存 5 分钟；前端查询按钮和后台任务共享缓存；
@@ -86,6 +87,7 @@ proxy_set_header User-Agent $http_user_agent;
 直接使用 Docker Hub 镜像：
 
 ```bash
+mkdir -p data
 docker pull karllee830/sub2api-accountinfo:latest
 docker compose up -d
 ```
@@ -103,6 +105,8 @@ CONTAINER_IMAGE=ghcr.io/karllee830/sub2api-accountinfo:latest docker compose up 
 docker compose up -d --build
 ```
 
+accountinfo 会把已识别的账号 5h/7d 窗口起点保存到宿主机的 `./data/usage-window-state.json`。Compose 使用目录映射 `./data:/app/data`，所以普通容器重启、重新创建容器或更新镜像不会丢失该文件；只有删除或清空宿主机 `data` 目录才会丢失窗口记录。
+
 健康检查地址为 `GET /healthz`，不需要用户 Token。
 
 ## 对接的 Sub2API 接口
@@ -119,6 +123,7 @@ docker compose up -d --build
 - `GET /api/v1/admin/accounts?group=:group_id`
 - `GET /api/v1/admin/accounts/:id/usage`
 - `GET /api/v1/admin/accounts/:id/usage?source=active&force=true`
+- `GET /api/v1/admin/usage?user_id=:user_id&account_id=:account_id&start_date=:date&end_date=:date`
 - `GET /api/v1/admin/openai/accounts/:id/quota`
 - `POST /api/v1/admin/openai/accounts/:id/reset-quota`（用户手动重置需通过全局开关或用户属性授权；自动任务由 `AUTO_RESET_CREDITS` 控制）
 

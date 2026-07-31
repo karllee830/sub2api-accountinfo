@@ -8,14 +8,17 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/sub2api
 
 FROM alpine:3.22
 
-RUN apk add --no-cache ca-certificates \
+RUN apk add --no-cache ca-certificates su-exec \
     && addgroup -S app \
-    && adduser -S -G app -u 10001 app
+    && adduser -S -G app -u 10001 app \
+    && mkdir -p /app/data \
+    && chown app:app /app/data
 COPY --from=builder /out/sub2api-accountinfo /usr/local/bin/sub2api-accountinfo
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
 
-USER app
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1
 
-ENTRYPOINT ["/usr/local/bin/sub2api-accountinfo"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

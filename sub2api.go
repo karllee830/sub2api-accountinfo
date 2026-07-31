@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -310,16 +311,10 @@ func (a *app) loadAccountUsage(ctx context.Context, groups []dashboardGroup, use
 			}
 			defer func() { <-semaphore }()
 
-			query := url.Values{}
-			if userID > 0 {
-				query.Set("user_id", strconv.FormatInt(userID, 10))
+			data, upstreamErr := a.queryAccountUsage(ctx, accountID, active)
+			if upstreamErr == nil {
+				data = a.enrichAccountUsageForUser(ctx, accountID, userID, data, time.Now().UTC())
 			}
-			if active {
-				query.Set("source", "active")
-				query.Set("force", "true")
-			}
-			var data json.RawMessage
-			upstreamErr := a.doAdminRequest(ctx, http.MethodGet, "/admin/accounts/"+strconv.FormatInt(accountID, 10)+"/usage", query, &data)
 			result := usageResult{data: data}
 			if upstreamErr != nil {
 				result.err = upstreamErr.Message
@@ -338,6 +333,23 @@ func (a *app) loadAccountUsage(ctx context.Context, groups []dashboardGroup, use
 			groups[groupIndex].Accounts[accountIndex].UsageError = result.err
 		}
 	}
+}
+
+func (a *app) queryAccountUsage(ctx context.Context, accountID int64, active bool) (json.RawMessage, *upstreamAPIError) {
+	query := url.Values{}
+	if active {
+		query.Set("source", "active")
+		query.Set("force", "true")
+	}
+	var data json.RawMessage
+	upstreamErr := a.doAdminRequest(
+		ctx,
+		http.MethodGet,
+		"/admin/accounts/"+strconv.FormatInt(accountID, 10)+"/usage",
+		query,
+		&data,
+	)
+	return data, upstreamErr
 }
 
 func (a *app) userCanAccessAccount(ctx context.Context, userID, accountID int64) (bool, *requestError) {
