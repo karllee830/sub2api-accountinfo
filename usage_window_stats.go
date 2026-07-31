@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,6 +21,7 @@ const (
 	usageZeroConfirmationDelay   = autoResetAccountScanInterval
 	usageZeroPendingPayloadField = "utilization_pending_confirmation"
 	userStatsUnavailableField    = "user_window_stats_unavailable"
+	resetTimePendingField        = "reset_time_pending"
 )
 
 type usageWindowDefinition struct {
@@ -263,31 +265,37 @@ type usageLogPage struct {
 }
 
 type usageLogEntry struct {
-	UserID              int64   `json:"user_id"`
-	InputTokens         int     `json:"input_tokens"`
-	OutputTokens        int     `json:"output_tokens"`
-	CacheCreationTokens int     `json:"cache_creation_tokens"`
-	CacheReadTokens     int     `json:"cache_read_tokens"`
-	ActualCost          float64 `json:"actual_cost"`
-	CreatedAt           string  `json:"created_at"`
+	UserID                int64    `json:"user_id"`
+	InputTokens           int64    `json:"input_tokens"`
+	OutputTokens          int64    `json:"output_tokens"`
+	CacheCreationTokens   int64    `json:"cache_creation_tokens"`
+	CacheReadTokens       int64    `json:"cache_read_tokens"`
+	TotalCost             float64  `json:"total_cost"`
+	ActualCost            float64  `json:"actual_cost"`
+	AccountStatsCost      *float64 `json:"account_stats_cost"`
+	AccountRateMultiplier *float64 `json:"account_rate_multiplier"`
+	CreatedAt             string   `json:"created_at"`
 }
 
 type userWindowStats struct {
-	Requests int64   `json:"requests"`
-	Tokens   int64   `json:"tokens"`
-	Cost     float64 `json:"cost"`
+	Requests  int64   `json:"requests"`
+	Tokens    int64   `json:"tokens"`
+	Cost      float64 `json:"cost"`
+	QuotaCost float64 `json:"-"`
 }
 
 type userUsageAggregate struct {
-	TotalRequests   int64   `json:"total_requests"`
-	TotalTokens     int64   `json:"total_tokens"`
-	TotalActualCost float64 `json:"total_actual_cost"`
+	TotalRequests    *int64   `json:"total_requests"`
+	TotalTokens      *int64   `json:"total_tokens"`
+	TotalActualCost  *float64 `json:"total_actual_cost"`
+	TotalAccountCost *float64 `json:"total_account_cost"`
 }
 
 type activeUsageWindow struct {
-	progress map[string]any
-	startAt  time.Time
-	resetAt  time.Time
+	progress    map[string]any
+	stateKey    string
+	startAt     time.Time
+	provisional bool
 }
 
 func (a *app) enrichAccountUsageForUser(
@@ -295,12 +303,19 @@ func (a *app) enrichAccountUsageForUser(
 	accountID, userID int64,
 	data json.RawMessage,
 	now time.Time,
+	allowProvisionalWindows bool,
+	force bool,
 ) json.RawMessage {
 	if userID <= 0 {
 		return data
 	}
 
-	payload, activeWindows, ok := a.resolveAccountUsageWindows(accountID, data, now)
+	payload, activeWindows, ok := a.resolveAccountUsageWindowsWithOptions(
+		accountID,
+		data,
+		now,
+		allowProvisionalWindows,
+	)
 	if !ok {
 		return data
 	}
@@ -309,7 +324,19 @@ func (a *app) enrichAccountUsageForUser(
 	}
 
 	for _, window := range activeWindows {
-		stats, upstreamErr := a.fetchUserWindowStats(ctx, userID, accountID, window.startAt, now)
+		cacheKey := userUsageStatsCacheKey{
+			userID:      userID,
+			accountID:   accountID,
+			windowKey:   window.stateKey,
+			windowStart: window.startAt.UnixNano(),
+			provisional: window.provisional,
+		}
+		if window.provisional {
+			cacheKey.windowStart = 0
+		}
+		stats, upstreamErr := a.userUsageCache.load(ctx, cacheKey, force, func() (userWindowStats, *upstreamAPIError) {
+			return a.fetchUserWindowStats(ctx, userID, accountID, window.startAt, now, force)
+		})
 		if upstreamErr != nil {
 			log.Printf(
 				"user usage window stats failed: user_id=%d account_id=%d start_at=%s end_at=%s: %v",
@@ -327,14 +354,16 @@ func (a *app) enrichAccountUsageForUser(
 		}
 		delete(window.progress, userStatsUnavailableField)
 		window.progress["user_window_stats"] = stats
-		if pending, _ := window.progress[usageZeroPendingPayloadField].(bool); pending {
+		if pending, _ := window.progress[usageZeroPendingPayloadField].(bool); pending || window.provisional {
+			delete(window.progress, "user_utilization")
+			delete(window.progress, "user_utilization_estimated")
 			continue
 		}
 
 		accountUtilization, hasUtilization := numberValue(window.progress["utilization"])
 		accountCost, hasAccountCost := usageWindowAccountCost(window.progress)
-		if hasUtilization && hasAccountCost && accountCost > 0 && accountUtilization >= 0 && stats.Cost >= 0 {
-			userUtilization := accountUtilization * stats.Cost / accountCost
+		if hasUtilization && hasAccountCost && accountCost > 0 && accountUtilization >= 0 && stats.QuotaCost >= 0 {
+			userUtilization := accountUtilization * stats.QuotaCost / accountCost
 			if userUtilization < 0 {
 				userUtilization = 0
 			}
@@ -353,6 +382,15 @@ func (a *app) resolveAccountUsageWindows(
 	accountID int64,
 	data json.RawMessage,
 	now time.Time,
+) (map[string]any, []activeUsageWindow, bool) {
+	return a.resolveAccountUsageWindowsWithOptions(accountID, data, now, false)
+}
+
+func (a *app) resolveAccountUsageWindowsWithOptions(
+	accountID int64,
+	data json.RawMessage,
+	now time.Time,
+	allowProvisionalWindows bool,
 ) (map[string]any, []activeUsageWindow, bool) {
 	if len(data) == 0 || accountID <= 0 || a.usageWindowState == nil {
 		return nil, nil, false
@@ -380,13 +418,27 @@ func (a *app) resolveAccountUsageWindows(
 				utilization,
 				hasUtilization,
 			)
-			if !preserved {
+			if preserved {
+				resetAt = preservedResetAt
+				progress["resets_at"] = resetAt.Format(time.RFC3339)
+				progress["remaining_seconds"] = int(resetAt.Sub(now).Seconds())
+			} else if allowProvisionalWindows {
+				startAt := now.Add(-definition.duration).UTC()
+				progress["window_start_at"] = startAt.Format(time.RFC3339)
+				progress[resetTimePendingField] = true
+				delete(progress, usageZeroPendingPayloadField)
+				activeWindows = append(activeWindows, activeUsageWindow{
+					progress:    progress,
+					stateKey:    definition.stateKey,
+					startAt:     startAt,
+					provisional: true,
+				})
+				continue
+			} else {
 				continue
 			}
-			resetAt = preservedResetAt
-			progress["resets_at"] = resetAt.Format(time.RFC3339)
-			progress["remaining_seconds"] = int(resetAt.Sub(now).Seconds())
 		}
+		delete(progress, resetTimePendingField)
 		suggestedStart, _ := parseUsageTimestamp(progress["window_start_at"])
 		startAt, pendingZero, ok := a.usageWindowState.resolveObserved(
 			accountID,
@@ -408,8 +460,8 @@ func (a *app) resolveAccountUsageWindows(
 		progress["window_start_at"] = startAt.Format(time.RFC3339)
 		activeWindows = append(activeWindows, activeUsageWindow{
 			progress: progress,
+			stateKey: definition.stateKey,
 			startAt:  startAt,
-			resetAt:  resetAt,
 		})
 	}
 
@@ -424,6 +476,7 @@ func (a *app) fetchUserWindowStats(
 	ctx context.Context,
 	userID, accountID int64,
 	startAt, endAt time.Time,
+	force bool,
 ) (userWindowStats, *upstreamAPIError) {
 	if userID <= 0 || accountID <= 0 || startAt.IsZero() || !endAt.After(startAt) {
 		return userWindowStats{}, nil
@@ -438,13 +491,13 @@ func (a *app) fetchUserWindowStats(
 	}
 
 	if startAt.Equal(startDay) {
-		return a.fetchAggregatedUserUsageStats(ctx, userID, accountID, startDay, endAt)
+		return a.fetchAggregatedUserUsageStats(ctx, userID, accountID, startDay, endAt, force)
 	}
 
 	prefixDuration := startAt.Sub(startDay)
 	suffixDuration := boundaryEnd.Sub(startAt)
 	if prefixDuration <= suffixDuration {
-		total, upstreamErr := a.fetchAggregatedUserUsageStats(ctx, userID, accountID, startDay, endAt)
+		total, upstreamErr := a.fetchAggregatedUserUsageStats(ctx, userID, accountID, startDay, endAt, force)
 		if upstreamErr != nil {
 			return userWindowStats{}, upstreamErr
 		}
@@ -458,7 +511,7 @@ func (a *app) fetchUserWindowStats(
 	total := userWindowStats{}
 	if nextDay.Before(endAt) {
 		var upstreamErr *upstreamAPIError
-		total, upstreamErr = a.fetchAggregatedUserUsageStats(ctx, userID, accountID, nextDay, endAt)
+		total, upstreamErr = a.fetchAggregatedUserUsageStats(ctx, userID, accountID, nextDay, endAt, force)
 		if upstreamErr != nil {
 			return userWindowStats{}, upstreamErr
 		}
@@ -467,13 +520,14 @@ func (a *app) fetchUserWindowStats(
 	if upstreamErr != nil {
 		return userWindowStats{}, upstreamErr
 	}
-	return addUserWindowStats(total, boundary), nil
+	return addUserWindowStats(total, boundary)
 }
 
 func (a *app) fetchAggregatedUserUsageStats(
 	ctx context.Context,
 	userID, accountID int64,
 	startAt, endAt time.Time,
+	force bool,
 ) (userWindowStats, *upstreamAPIError) {
 	if !endAt.After(startAt) {
 		return userWindowStats{}, nil
@@ -485,17 +539,15 @@ func (a *app) fetchAggregatedUserUsageStats(
 		"start_date": {startAt.UTC().Format("2006-01-02")},
 		"end_date":   {lastIncluded.Format("2006-01-02")},
 		"timezone":   {"UTC"},
-		"nocache":    {"true"},
+	}
+	if force {
+		query.Set("nocache", "true")
 	}
 	var aggregate userUsageAggregate
 	if upstreamErr := a.doAdminRequest(ctx, http.MethodGet, "/admin/usage/stats", query, &aggregate); upstreamErr != nil {
 		return userWindowStats{}, upstreamErr
 	}
-	return userWindowStats{
-		Requests: aggregate.TotalRequests,
-		Tokens:   aggregate.TotalTokens,
-		Cost:     aggregate.TotalActualCost,
-	}, nil
+	return aggregate.toUserWindowStats()
 }
 
 func (a *app) fetchUserUsageBoundary(
@@ -568,7 +620,7 @@ func (a *app) fetchUserUsageBoundaryWithPageSize(
 		for _, entry := range result.Items {
 			createdAt, err := time.Parse(time.RFC3339Nano, entry.CreatedAt)
 			if err != nil {
-				continue
+				return userWindowStats{}, &upstreamAPIError{Message: "Sub2API 用户用量明细时间无效", Cause: err}
 			}
 			createdAt = createdAt.UTC()
 			if sortOrder == "asc" && !createdAt.Before(endAt) {
@@ -578,7 +630,9 @@ func (a *app) fetchUserUsageBoundaryWithPageSize(
 				return stats, nil
 			}
 			if entry.UserID == userID && !createdAt.Before(startAt) && createdAt.Before(endAt) {
-				accumulateUserUsage(&stats, entry)
+				if upstreamErr := accumulateUserUsage(&stats, entry); upstreamErr != nil {
+					return userWindowStats{}, upstreamErr
+				}
 			}
 		}
 		if result.Pages <= page || len(result.Items) == 0 {
@@ -588,49 +642,128 @@ func (a *app) fetchUserUsageBoundaryWithPageSize(
 	return userWindowStats{}, &upstreamAPIError{Message: "Sub2API 用户用量边界明细超过安全上限"}
 }
 
-func summarizeUserUsageLogs(logs []usageLogEntry, userID int64, startAt, endAt time.Time) userWindowStats {
-	stats := userWindowStats{}
-	for _, entry := range logs {
-		if entry.UserID != userID {
-			continue
-		}
-		createdAt, err := time.Parse(time.RFC3339Nano, entry.CreatedAt)
-		if err != nil || createdAt.Before(startAt) || !createdAt.Before(endAt) {
-			continue
-		}
-		accumulateUserUsage(&stats, entry)
+func (aggregate userUsageAggregate) toUserWindowStats() (userWindowStats, *upstreamAPIError) {
+	if aggregate.TotalRequests == nil || aggregate.TotalTokens == nil ||
+		aggregate.TotalActualCost == nil || aggregate.TotalAccountCost == nil {
+		return userWindowStats{}, &upstreamAPIError{Message: "Sub2API 用户用量聚合字段不完整"}
 	}
-	return stats
-}
-
-func accumulateUserUsage(stats *userWindowStats, entry usageLogEntry) {
-	stats.Requests++
-	stats.Tokens += int64(entry.InputTokens + entry.OutputTokens + entry.CacheCreationTokens + entry.CacheReadTokens)
-	stats.Cost += entry.ActualCost
-}
-
-func addUserWindowStats(left, right userWindowStats) userWindowStats {
+	if *aggregate.TotalRequests < 0 || *aggregate.TotalTokens < 0 ||
+		!isNonNegativeFinite(*aggregate.TotalActualCost) || !isNonNegativeFinite(*aggregate.TotalAccountCost) {
+		return userWindowStats{}, &upstreamAPIError{Message: "Sub2API 用户用量聚合数值无效"}
+	}
 	return userWindowStats{
-		Requests: left.Requests + right.Requests,
-		Tokens:   left.Tokens + right.Tokens,
-		Cost:     left.Cost + right.Cost,
+		Requests:  *aggregate.TotalRequests,
+		Tokens:    *aggregate.TotalTokens,
+		Cost:      *aggregate.TotalActualCost,
+		QuotaCost: *aggregate.TotalAccountCost,
+	}, nil
+}
+
+func accumulateUserUsage(stats *userWindowStats, entry usageLogEntry) *upstreamAPIError {
+	if entry.InputTokens < 0 || entry.OutputTokens < 0 || entry.CacheCreationTokens < 0 || entry.CacheReadTokens < 0 ||
+		!isNonNegativeFinite(entry.TotalCost) || !isNonNegativeFinite(entry.ActualCost) {
+		return &upstreamAPIError{Message: "Sub2API 用户用量明细数值无效"}
 	}
+	tokenCount, ok := addNonNegativeInt64(
+		entry.InputTokens,
+		entry.OutputTokens,
+		entry.CacheCreationTokens,
+		entry.CacheReadTokens,
+	)
+	if !ok {
+		return &upstreamAPIError{Message: "Sub2API 用户用量明细令牌数溢出"}
+	}
+	accountCost := entry.TotalCost
+	if entry.AccountStatsCost != nil {
+		if !isNonNegativeFinite(*entry.AccountStatsCost) {
+			return &upstreamAPIError{Message: "Sub2API 用户用量账号成本无效"}
+		}
+		accountCost = *entry.AccountStatsCost
+	}
+	accountMultiplier := 1.0
+	if entry.AccountRateMultiplier != nil {
+		if !isNonNegativeFinite(*entry.AccountRateMultiplier) {
+			return &upstreamAPIError{Message: "Sub2API 用户用量账号倍率无效"}
+		}
+		accountMultiplier = *entry.AccountRateMultiplier
+	}
+	quotaCost := accountCost * accountMultiplier
+	if !isNonNegativeFinite(quotaCost) {
+		return &upstreamAPIError{Message: "Sub2API 用户用量账号成本无效"}
+	}
+
+	requests, ok := addNonNegativeInt64(stats.Requests, 1)
+	if !ok {
+		return &upstreamAPIError{Message: "Sub2API 用户用量请求数溢出"}
+	}
+	tokens, ok := addNonNegativeInt64(stats.Tokens, tokenCount)
+	if !ok {
+		return &upstreamAPIError{Message: "Sub2API 用户用量令牌数溢出"}
+	}
+	cost := stats.Cost + entry.ActualCost
+	quotaCostTotal := stats.QuotaCost + quotaCost
+	if !isNonNegativeFinite(cost) || !isNonNegativeFinite(quotaCostTotal) {
+		return &upstreamAPIError{Message: "Sub2API 用户用量金额溢出"}
+	}
+
+	stats.Requests = requests
+	stats.Tokens = tokens
+	stats.Cost = cost
+	stats.QuotaCost = quotaCostTotal
+	return nil
+}
+
+func addUserWindowStats(left, right userWindowStats) (userWindowStats, *upstreamAPIError) {
+	requests, requestsOK := addNonNegativeInt64(left.Requests, right.Requests)
+	tokens, tokensOK := addNonNegativeInt64(left.Tokens, right.Tokens)
+	cost := left.Cost + right.Cost
+	quotaCost := left.QuotaCost + right.QuotaCost
+	if !requestsOK || !tokensOK || !isNonNegativeFinite(cost) || !isNonNegativeFinite(quotaCost) {
+		return userWindowStats{}, &upstreamAPIError{Message: "Sub2API 用户用量合计数值无效"}
+	}
+	return userWindowStats{
+		Requests:  requests,
+		Tokens:    tokens,
+		Cost:      cost,
+		QuotaCost: quotaCost,
+	}, nil
 }
 
 func subtractUserWindowStats(total, excluded userWindowStats) (userWindowStats, *upstreamAPIError) {
 	const costTolerance = 1e-9
-	if excluded.Requests > total.Requests || excluded.Tokens > total.Tokens || excluded.Cost > total.Cost+costTolerance {
+	if excluded.Requests > total.Requests || excluded.Tokens > total.Tokens ||
+		excluded.Cost > total.Cost+costTolerance || excluded.QuotaCost > total.QuotaCost+costTolerance {
 		return userWindowStats{}, &upstreamAPIError{Message: "Sub2API 用户用量聚合结果不一致"}
 	}
 	result := userWindowStats{
-		Requests: total.Requests - excluded.Requests,
-		Tokens:   total.Tokens - excluded.Tokens,
-		Cost:     total.Cost - excluded.Cost,
+		Requests:  total.Requests - excluded.Requests,
+		Tokens:    total.Tokens - excluded.Tokens,
+		Cost:      total.Cost - excluded.Cost,
+		QuotaCost: total.QuotaCost - excluded.QuotaCost,
 	}
 	if result.Cost < 0 && result.Cost >= -costTolerance {
 		result.Cost = 0
 	}
+	if result.QuotaCost < 0 && result.QuotaCost >= -costTolerance {
+		result.QuotaCost = 0
+	}
 	return result, nil
+}
+
+func isNonNegativeFinite(value float64) bool {
+	return value >= 0 && !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+func addNonNegativeInt64(values ...int64) (int64, bool) {
+	const maxInt64 = int64(^uint64(0) >> 1)
+	total := int64(0)
+	for _, value := range values {
+		if value < 0 || total > maxInt64-value {
+			return 0, false
+		}
+		total += value
+	}
+	return total, true
 }
 
 func utcDayStart(value time.Time) time.Time {

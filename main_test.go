@@ -91,13 +91,13 @@ func TestDashboardAuthenticatesUserAndLoadsSubscribedAccountUsage(t *testing.T) 
 			if request.URL.Query().Get("user_id") != "2" || request.URL.Query().Get("account_id") != "14" {
 				t.Errorf("usage log query = %q", request.URL.RawQuery)
 			}
-			writeUpstream(response, http.StatusOK, fmt.Sprintf(`{"code":0,"message":"success","data":{"items":[{"user_id":2,"input_tokens":10,"output_tokens":5,"cache_creation_tokens":2,"cache_read_tokens":3,"actual_cost":2.5,"created_at":%q}],"total":1,"page":1,"page_size":200,"pages":1}}`, createdAt.Format(time.RFC3339)))
+			writeUpstream(response, http.StatusOK, fmt.Sprintf(`{"code":0,"message":"success","data":{"items":[{"user_id":2,"input_tokens":10,"output_tokens":5,"cache_creation_tokens":2,"cache_read_tokens":3,"total_cost":2.5,"actual_cost":2.5,"account_rate_multiplier":1,"created_at":%q}],"total":1,"page":1,"page_size":200,"pages":1}}`, createdAt.Format(time.RFC3339)))
 		case "/api/v1/admin/usage/stats":
 			assertAdminRequest(t, request)
 			if request.URL.Query().Get("user_id") != "2" || request.URL.Query().Get("account_id") != "14" {
 				t.Errorf("usage stats query = %q", request.URL.RawQuery)
 			}
-			writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":{"total_requests":1,"total_tokens":20,"total_actual_cost":2.5}}`)
+			writeUpstream(response, http.StatusOK, `{"code":0,"message":"success","data":{"total_requests":1,"total_tokens":20,"total_actual_cost":2.5,"total_account_cost":2.5}}`)
 		default:
 			t.Fatalf("unexpected upstream path %s", request.URL.Path)
 		}
@@ -430,6 +430,7 @@ func TestAccountsWithoutRenderableUsageWindowsAreHidden(t *testing.T) {
 	content := string(script)
 	for _, text := range []string{
 		"function hasRenderableUsageWindow(usage)",
+		"if (usage.reset_time_pending) return true",
 		"new Date(usage.resets_at).getTime()",
 		"const renderableWindows = windowDefinitions.filter",
 		"if (renderableWindows.length === 0) return null",
@@ -452,7 +453,8 @@ func TestUsageWindowStatsUseChineseLabelsAndBudgetEstimate(t *testing.T) {
 		"请求 ${formatCompact(windowStats.requests)}",
 		"令牌 ${formatCompact(windowStats.tokens)}",
 		"账号消费 $${formatMoney(windowStats.cost)}",
-		"当前用户消费 $${formatMoney(userWindowStats.cost)}",
+		"${userCostLabel} $${formatMoney(userWindowStats.cost)}",
+		"暂未获取到重置时间，请等待下次重置",
 		"usage.user_utilization",
 		"推算总额度 $${formatMoney(budget.total)}",
 		"推算剩余 $${formatMoney(budget.remaining)}",

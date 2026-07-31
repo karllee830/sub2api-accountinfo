@@ -307,7 +307,9 @@
   }
 
   function hasRenderableUsageWindow(usage) {
-    if (!usage || typeof usage !== 'object' || !usage.resets_at) return false
+    if (!usage || typeof usage !== 'object') return false
+    if (usage.reset_time_pending) return true
+    if (!usage.resets_at) return false
     return Number.isFinite(new Date(usage.resets_at).getTime())
   }
 
@@ -364,6 +366,9 @@
     if (displayUtilization.isPending) {
       stats.append(createChip('OpenAI 暂时返回 0%，等待确认', 'stat-chip stat-chip-warning'))
     }
+    if (usage.reset_time_pending) {
+      stats.append(createChip('暂未获取到重置时间，请等待下次重置', 'stat-chip stat-chip-warning'))
+    }
     const windowStats = displayUtilization.isPending ? null : usage.window_stats
     if (windowStats) {
       stats.append(
@@ -381,14 +386,19 @@
     }
     const userWindowStats = usage.user_window_stats
     if (userWindowStats && userWindowStats.cost !== undefined && userWindowStats.cost !== null) {
-      stats.append(createChip(`当前用户消费 $${formatMoney(userWindowStats.cost)}`))
+      const userCostLabel = usage.reset_time_pending ? '当前用户临时统计消费' : '当前用户消费'
+      stats.append(createChip(`${userCostLabel} $${formatMoney(userWindowStats.cost)}`))
     } else if (usage.user_window_stats_unavailable) {
       stats.append(createChip('当前用户用量暂不可用', 'stat-chip stat-chip-warning'))
     }
     const reset = document.createElement('span')
     reset.className = 'reset-time'
-    reset.title = usage.resets_at ? formatDate(usage.resets_at) : ''
-    reset.textContent = `↻ ${formatResetTime(usage.resets_at, usage.utilization)}`
+    reset.title = usage.reset_time_pending
+      ? '暂未获取到重置时间，请等待下次重置'
+      : (usage.resets_at ? formatDate(usage.resets_at) : '')
+    reset.textContent = usage.reset_time_pending
+      ? '↻ 等待重置时间'
+      : `↻ ${formatResetTime(usage.resets_at, usage.utilization)}`
     footer.append(stats, reset)
 
     wrapper.append(header, track, footer)

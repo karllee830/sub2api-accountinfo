@@ -284,10 +284,10 @@ func (a *app) listGroupAccounts(ctx context.Context, groupID int64) ([]accountVi
 }
 
 func (a *app) loadAccountUsage(ctx context.Context, groups []dashboardGroup, userID int64, active bool) {
-	accountIDs := make(map[int64]struct{})
+	accountsByID := make(map[int64]accountView)
 	for _, group := range groups {
 		for _, account := range group.Accounts {
-			accountIDs[account.ID] = struct{}{}
+			accountsByID[account.ID] = account
 		}
 	}
 
@@ -295,12 +295,13 @@ func (a *app) loadAccountUsage(ctx context.Context, groups []dashboardGroup, use
 		data json.RawMessage
 		err  string
 	}
-	results := make(map[int64]usageResult, len(accountIDs))
+	results := make(map[int64]usageResult, len(accountsByID))
 	var mutex sync.Mutex
 	var waitGroup sync.WaitGroup
 	semaphore := make(chan struct{}, usageConcurrency)
-	for accountID := range accountIDs {
+	for accountID, account := range accountsByID {
 		accountID := accountID
+		account := account
 		waitGroup.Add(1)
 		go func() {
 			defer waitGroup.Done()
@@ -313,7 +314,16 @@ func (a *app) loadAccountUsage(ctx context.Context, groups []dashboardGroup, use
 
 			data, upstreamErr := a.queryAccountUsage(ctx, accountID, active)
 			if upstreamErr == nil {
-				data = a.enrichAccountUsageForUser(ctx, accountID, userID, data, time.Now().UTC())
+				allowProvisionalWindows := allowsProvisionalUsageWindows(account)
+				data = a.enrichAccountUsageForUser(
+					ctx,
+					accountID,
+					userID,
+					data,
+					time.Now().UTC(),
+					allowProvisionalWindows,
+					active,
+				)
 			}
 			result := usageResult{data: data}
 			if upstreamErr != nil {
@@ -333,6 +343,11 @@ func (a *app) loadAccountUsage(ctx context.Context, groups []dashboardGroup, use
 			groups[groupIndex].Accounts[accountIndex].UsageError = result.err
 		}
 	}
+}
+
+func allowsProvisionalUsageWindows(account accountView) bool {
+	return strings.EqualFold(strings.TrimSpace(account.Platform), "openai") &&
+		strings.EqualFold(strings.TrimSpace(account.Type), "oauth")
 }
 
 func (a *app) queryAccountUsage(ctx context.Context, accountID int64, active bool) (json.RawMessage, *upstreamAPIError) {
