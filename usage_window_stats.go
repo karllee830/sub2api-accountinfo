@@ -90,15 +90,18 @@ func (a *app) enrichAccountUsageForUser(
 	}
 
 	for _, window := range activeWindows {
+		if window.provisional {
+			delete(window.progress, "user_window_stats")
+			delete(window.progress, userStatsUnavailableField)
+			delete(window.progress, "user_utilization")
+			delete(window.progress, "user_utilization_estimated")
+			continue
+		}
 		cacheKey := userUsageStatsCacheKey{
 			userID:      userID,
 			accountID:   accountID,
 			windowKey:   window.stateKey,
 			windowStart: window.startAt.Unix(),
-			provisional: window.provisional,
-		}
-		if window.provisional {
-			cacheKey.windowStart = 0
 		}
 		stats, upstreamErr := a.userUsageCache.load(ctx, cacheKey, force, func() (userWindowStats, *upstreamAPIError) {
 			return a.fetchUserWindowStats(ctx, userID, accountID, window.startAt, now, force)
@@ -120,11 +123,6 @@ func (a *app) enrichAccountUsageForUser(
 		}
 		delete(window.progress, userStatsUnavailableField)
 		window.progress["user_window_stats"] = stats
-		if window.provisional {
-			delete(window.progress, "user_utilization")
-			delete(window.progress, "user_utilization_estimated")
-			continue
-		}
 
 		accountUtilization, hasUtilization := numberValue(window.progress["utilization"])
 		accountCost, hasAccountCost := usageWindowAccountCost(window.progress)

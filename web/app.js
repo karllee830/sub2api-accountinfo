@@ -458,19 +458,17 @@
       }
     }
     const userWindowStats = usage.user_window_stats
-    if (userWindowStats && userWindowStats.cost !== undefined && userWindowStats.cost !== null) {
-      const userCostLabel = usage.reset_time_pending ? '临时统计消费' : '窗口消费'
+    if (!usage.reset_time_pending && userWindowStats && userWindowStats.cost !== undefined && userWindowStats.cost !== null) {
       details.append(createWindowDetailGroup('您的用量', [
-        createWindowMetric(userCostLabel, `$${formatMoney(userWindowStats.cost)}`, 'window-metric-user')
+        createWindowMetric('窗口消费', `$${formatMoney(userWindowStats.cost)}`, 'window-metric-user')
       ], 'window-detail-group-user'))
-    } else if (usage.user_window_stats_unavailable) {
+    } else if (!usage.reset_time_pending && usage.user_window_stats_unavailable) {
       details.append(createWindowDetailGroup('您的用量', [
         createWindowMetric('消费统计', '暂不可用', 'window-metric-warning')
       ], 'window-detail-group-user window-detail-group-warning'))
     }
 
-    wrapper.append(header, track)
-    if (alerts.childElementCount > 0) wrapper.append(alerts)
+    wrapper.append(header, track, alerts)
     if (details.childElementCount > 0) wrapper.append(details)
     return wrapper
   }

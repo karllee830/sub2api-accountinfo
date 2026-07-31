@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -54,21 +55,21 @@ func TestEnrichAccountUsageUsesAccountCostForUserPercentage(t *testing.T) {
 	}
 }
 
-func TestEnrichAccountUsageShowsProvisionalCostWithoutResetTime(t *testing.T) {
+func TestEnrichAccountUsageOmitsUserStatsWithoutResetTime(t *testing.T) {
+	var usageCalls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != "/api/v1/admin/usage" {
-			t.Fatalf("unexpected upstream path: %s", request.URL.Path)
-		}
-		writeUpstream(response, http.StatusOK, `{"code":0,"data":{"items":[`+
-			`{"user_id":2,"input_tokens":10,"output_tokens":10,"total_cost":2,"actual_cost":3,"account_rate_multiplier":1,"created_at":"2026-07-31T10:00:00Z"}`+
-			`],"page":1,"page_size":200,"pages":1}}`)
+		usageCalls.Add(1)
+		writeUpstream(response, http.StatusInternalServerError, `{"code":500,"message":"unexpected user usage request"}`)
 	}))
 	defer upstream.Close()
 
 	application := newApp(testConfig(t, upstream.URL))
 	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
-	raw := json.RawMessage(`{"five_hour":{"utilization":20,"window_stats":{"cost":10}}}`)
+	raw := json.RawMessage(`{"five_hour":{"utilization":20,"window_stats":{"cost":10},"user_window_stats":{"cost":99},"user_window_stats_unavailable":true,"user_utilization":10,"user_utilization_estimated":true}}`)
 	enriched := application.enrichAccountUsageForUser(context.Background(), 14, 2, raw, now, true, false)
+	if usageCalls.Load() != 0 {
+		t.Fatalf("user usage calls = %d, want 0", usageCalls.Load())
+	}
 
 	var payload map[string]any
 	if err := json.Unmarshal(enriched, &payload); err != nil {
@@ -78,12 +79,15 @@ func TestEnrichAccountUsageShowsProvisionalCostWithoutResetTime(t *testing.T) {
 	if progress[resetTimePendingField] != true {
 		t.Fatalf("reset pending marker missing: %#v", progress)
 	}
-	stats := progress["user_window_stats"].(map[string]any)
-	if stats["cost"] != float64(3) {
-		t.Fatalf("provisional user cost = %v, want 3", stats["cost"])
-	}
-	if _, exists := progress["user_utilization"]; exists {
-		t.Fatalf("provisional window must not estimate user utilization: %#v", progress)
+	for _, field := range []string{
+		"user_window_stats",
+		userStatsUnavailableField,
+		"user_utilization",
+		"user_utilization_estimated",
+	} {
+		if _, exists := progress[field]; exists {
+			t.Fatalf("pending-reset window includes %q: %#v", field, progress)
+		}
 	}
 
 	_, activeWindows, ok := resolveAccountUsageWindows(raw, now, false)

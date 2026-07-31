@@ -16,7 +16,6 @@ type userUsageStatsCacheKey struct {
 	accountID   int64
 	windowKey   string
 	windowStart int64
-	provisional bool
 }
 
 type userUsageStatsCacheEntry struct {

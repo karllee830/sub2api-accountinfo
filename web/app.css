@@ -524,6 +524,10 @@ h3 {
   margin-top: 9px;
 }
 
+.window-alerts:empty {
+  visibility: hidden;
+}
+
 .window-alert {
   position: relative;
   margin: 0;
@@ -1104,6 +1108,12 @@ h3 {
   }
 }
 
+@media (min-width: 721px) {
+  .window-alerts {
+    min-height: 30px;
+  }
+}
+
 @media (max-width: 720px) {
   .page-shell {
     padding: 12px;
@@ -1124,6 +1134,10 @@ h3 {
 
   .usage-windows {
     grid-template-columns: 1fr;
+  }
+
+  .window-alerts:empty {
+    display: none;
   }
 }
 

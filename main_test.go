@@ -458,14 +458,15 @@ func TestUsageWindowStatsUseChineseLabelsAndBudgetEstimate(t *testing.T) {
 		"createWindowMetric('总额度', `$${formatMoney(budget.total)}`",
 		"createWindowMetric('剩余额度', `$${formatMoney(budget.remaining)}`",
 		"createWindowDetailGroup('您的用量'",
-		"usage.reset_time_pending ? '临时统计消费' : '窗口消费'",
-		"createWindowMetric(userCostLabel, `$${formatMoney(userWindowStats.cost)}`",
+		"!usage.reset_time_pending && userWindowStats",
+		"createWindowMetric('窗口消费', `$${formatMoney(userWindowStats.cost)}`",
 		"暂未获取到重置时间，请等待使用一些时间后再查看",
 		"usage.user_utilization",
 		"const total = spent / (utilization / 100)",
 		"function windowProgressValues(usage)",
 		"return `${distance}后重置`",
 		": formatResetStatus(usage.resets_at, usage.utilization)",
+		"wrapper.append(header, track, alerts)",
 		"createWindowPercentage('您的用量'",
 		"'账号总用量'",
 		"progress-bar progress-bar-account",
@@ -531,6 +532,8 @@ func TestDesktopLayoutUsesWideCompactCanvas(t *testing.T) {
 		".auto-reset-banner-copy",
 		"grid-template-columns: minmax(230px, 0.72fr) minmax(0, 1.28fr);",
 		"grid-template-columns: 1.45fr 0.95fr 0.72fr;",
+		".window-alerts:empty",
+		"min-height: 30px;",
 	} {
 		if !strings.Contains(content, text) {
 			t.Fatalf("wide desktop layout is missing %q", text)
