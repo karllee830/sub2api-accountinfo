@@ -320,15 +320,60 @@
     return chip
   }
 
+  function createWindowMetric(label, value, className = '') {
+    const metric = document.createElement('div')
+    metric.className = `window-metric${className ? ` ${className}` : ''}`
+    const labelNode = document.createElement('span')
+    labelNode.className = 'window-metric-label'
+    labelNode.textContent = label
+    const valueNode = document.createElement('strong')
+    valueNode.className = 'window-metric-value'
+    valueNode.textContent = value
+    metric.append(labelNode, valueNode)
+    return metric
+  }
+
+  function createWindowDetailGroup(title, metrics, className = '') {
+    const group = document.createElement('section')
+    group.className = `window-detail-group${className ? ` ${className}` : ''}`
+    const heading = document.createElement('p')
+    heading.className = 'window-detail-title'
+    heading.textContent = title
+    const content = document.createElement('div')
+    content.className = 'window-metrics'
+    content.append(...metrics)
+    group.append(heading, content)
+    return group
+  }
+
+  function createWindowAlert(text) {
+    const alert = document.createElement('p')
+    alert.className = 'window-alert'
+    alert.textContent = text
+    return alert
+  }
+
   function renderWindow(label, usage) {
     const wrapper = document.createElement('section')
     wrapper.className = 'usage-window'
 
     const header = document.createElement('div')
     header.className = 'window-header'
+    const heading = document.createElement('div')
+    heading.className = 'window-heading'
     const labelNode = document.createElement('span')
     labelNode.className = 'window-label'
     labelNode.textContent = label
+    const reset = document.createElement('span')
+    reset.className = 'window-reset-status'
+    reset.title = usage.reset_time_pending
+      ? '暂未获取到重置时间，请等待下次重置'
+      : (usage.resets_at ? formatDate(usage.resets_at) : '')
+    reset.textContent = usage.reset_time_pending
+      ? '重置时间待确认'
+      : `重置 ${formatResetTime(usage.resets_at, usage.utilization)}`
+    if (usage.reset_time_pending) reset.classList.add('is-pending')
+    heading.append(labelNode, reset)
     const valueNode = document.createElement('span')
     valueNode.className = 'window-value'
     const displayUtilization = windowDisplayUtilization(usage)
@@ -340,7 +385,7 @@
         ? '按账号用量和当前用户消费占比估算'
         : '当前用户在此用量窗口中的使用率'
     }
-    header.append(labelNode, valueNode)
+    header.append(heading, valueNode)
 
     const track = document.createElement('div')
     track.className = 'progress-track'
@@ -359,49 +404,48 @@
     bar.style.width = displayUtilization.isPending ? '0%' : `${utilization}%`
     track.append(bar)
 
-    const footer = document.createElement('div')
-    footer.className = 'window-footer'
-    const stats = document.createElement('div')
-    stats.className = 'window-stats'
+    const alerts = document.createElement('div')
+    alerts.className = 'window-alerts'
     if (displayUtilization.isPending) {
-      stats.append(createChip('OpenAI 暂时返回 0%，等待确认', 'stat-chip stat-chip-warning'))
+      alerts.append(createWindowAlert('OpenAI 暂时返回 0%，正在等待下一轮扫描确认'))
     }
     if (usage.reset_time_pending) {
-      stats.append(createChip('暂未获取到重置时间，请等待下次重置', 'stat-chip stat-chip-warning'))
+      alerts.append(createWindowAlert('暂未获取到重置时间，请等待下次重置'))
     }
+
+    const details = document.createElement('div')
+    details.className = 'window-details'
     const windowStats = displayUtilization.isPending ? null : usage.window_stats
     if (windowStats) {
-      stats.append(
-        createChip(`请求 ${formatCompact(windowStats.requests)}`),
-        createChip(`令牌 ${formatCompact(windowStats.tokens)}`),
-        createChip(`账号消费 $${formatMoney(windowStats.cost)}`)
-      )
+      details.append(createWindowDetailGroup('账号用量', [
+        createWindowMetric('请求', formatCompact(windowStats.requests)),
+        createWindowMetric('令牌', formatCompact(windowStats.tokens)),
+        createWindowMetric('消费', `$${formatMoney(windowStats.cost)}`)
+      ], 'window-detail-group-account'))
+
       const budget = estimateWindowBudget(usage)
       if (budget) {
-        stats.append(
-          createChip(`推算总额度 $${formatMoney(budget.total)}`, 'stat-chip stat-chip-estimate'),
-          createChip(`推算剩余 $${formatMoney(budget.remaining)}`, 'stat-chip stat-chip-estimate stat-chip-estimate-remaining')
-        )
+        details.append(createWindowDetailGroup('额度估算', [
+          createWindowMetric('总额度', `$${formatMoney(budget.total)}`, 'window-metric-estimate'),
+          createWindowMetric('剩余额度', `$${formatMoney(budget.remaining)}`, 'window-metric-remaining')
+        ], 'window-detail-group-budget'))
       }
     }
     const userWindowStats = usage.user_window_stats
     if (userWindowStats && userWindowStats.cost !== undefined && userWindowStats.cost !== null) {
-      const userCostLabel = usage.reset_time_pending ? '当前用户临时统计消费' : '当前用户消费'
-      stats.append(createChip(`${userCostLabel} $${formatMoney(userWindowStats.cost)}`))
+      const userCostLabel = usage.reset_time_pending ? '临时统计消费' : '窗口消费'
+      details.append(createWindowDetailGroup('当前用户', [
+        createWindowMetric(userCostLabel, `$${formatMoney(userWindowStats.cost)}`, 'window-metric-user')
+      ], 'window-detail-group-user'))
     } else if (usage.user_window_stats_unavailable) {
-      stats.append(createChip('当前用户用量暂不可用', 'stat-chip stat-chip-warning'))
+      details.append(createWindowDetailGroup('当前用户', [
+        createWindowMetric('消费统计', '暂不可用', 'window-metric-warning')
+      ], 'window-detail-group-user window-detail-group-warning'))
     }
-    const reset = document.createElement('span')
-    reset.className = 'reset-time'
-    reset.title = usage.reset_time_pending
-      ? '暂未获取到重置时间，请等待下次重置'
-      : (usage.resets_at ? formatDate(usage.resets_at) : '')
-    reset.textContent = usage.reset_time_pending
-      ? '↻ 等待重置时间'
-      : `↻ ${formatResetTime(usage.resets_at, usage.utilization)}`
-    footer.append(stats, reset)
 
-    wrapper.append(header, track, footer)
+    wrapper.append(header, track)
+    if (alerts.childElementCount > 0) wrapper.append(alerts)
+    if (details.childElementCount > 0) wrapper.append(details)
     return wrapper
   }
 

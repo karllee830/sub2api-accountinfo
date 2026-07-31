@@ -450,17 +450,21 @@ func TestUsageWindowStatsUseChineseLabelsAndBudgetEstimate(t *testing.T) {
 	}
 	content := string(script)
 	for _, text := range []string{
-		"请求 ${formatCompact(windowStats.requests)}",
-		"令牌 ${formatCompact(windowStats.tokens)}",
-		"账号消费 $${formatMoney(windowStats.cost)}",
-		"${userCostLabel} $${formatMoney(userWindowStats.cost)}",
+		"createWindowDetailGroup('账号用量'",
+		"createWindowMetric('请求', formatCompact(windowStats.requests))",
+		"createWindowMetric('令牌', formatCompact(windowStats.tokens))",
+		"createWindowMetric('消费', `$${formatMoney(windowStats.cost)}`)",
+		"createWindowDetailGroup('额度估算'",
+		"createWindowMetric('总额度', `$${formatMoney(budget.total)}`",
+		"createWindowMetric('剩余额度', `$${formatMoney(budget.remaining)}`",
+		"createWindowDetailGroup('当前用户'",
+		"usage.reset_time_pending ? '临时统计消费' : '窗口消费'",
+		"createWindowMetric(userCostLabel, `$${formatMoney(userWindowStats.cost)}`",
 		"暂未获取到重置时间，请等待下次重置",
 		"usage.user_utilization",
-		"推算总额度 $${formatMoney(budget.total)}",
-		"推算剩余 $${formatMoney(budget.remaining)}",
 		"const total = spent / (utilization / 100)",
 		"usage?.utilization_pending_confirmation === true",
-		"OpenAI 暂时返回 0%，等待确认",
+		"OpenAI 暂时返回 0%，正在等待下一轮扫描确认",
 		"valueNode.textContent = displayUtilization.isPending ? '复核中'",
 	} {
 		if !strings.Contains(content, text) {
