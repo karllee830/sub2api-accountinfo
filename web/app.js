@@ -215,6 +215,20 @@
     return number.toFixed(number >= 100 ? 0 : number >= 1 ? 2 : 4)
   }
 
+  function estimateWindowBudget(usage) {
+    const utilization = Number(usage?.utilization)
+    const spent = Number(usage?.window_stats?.cost)
+    if (!Number.isFinite(utilization) || utilization <= 0 || !Number.isFinite(spent) || spent <= 0) {
+      return null
+    }
+    const total = spent / (utilization / 100)
+    if (!Number.isFinite(total) || total <= 0) return null
+    return {
+      total,
+      remaining: Math.max(0, total - spent)
+    }
+  }
+
   function formatDate(value) {
     const date = new Date(value)
     if (Number.isNaN(date.getTime())) return String(value || '-')
@@ -309,12 +323,19 @@
     const windowStats = usage.window_stats
     if (windowStats) {
       stats.append(
-        createChip(`${formatCompact(windowStats.requests)} req`),
-        createChip(`${formatCompact(windowStats.tokens)} tok`),
-        createChip(`A $${formatMoney(windowStats.cost)}`)
+        createChip(`请求 ${formatCompact(windowStats.requests)}`),
+        createChip(`令牌 ${formatCompact(windowStats.tokens)}`),
+        createChip(`账号消费 $${formatMoney(windowStats.cost)}`)
       )
       if (windowStats.user_cost !== undefined && windowStats.user_cost !== null) {
-        stats.append(createChip(`U $${formatMoney(windowStats.user_cost)}`))
+        stats.append(createChip(`用户消费 $${formatMoney(windowStats.user_cost)}`))
+      }
+      const budget = estimateWindowBudget(usage)
+      if (budget) {
+        stats.append(
+          createChip(`推算总额度 $${formatMoney(budget.total)}`, 'stat-chip stat-chip-estimate'),
+          createChip(`推算剩余 $${formatMoney(budget.remaining)}`, 'stat-chip stat-chip-estimate stat-chip-estimate-remaining')
+        )
       }
     }
     const reset = document.createElement('span')

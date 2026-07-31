@@ -402,6 +402,27 @@ func TestQuotaButtonOnlyTargetsOAuthAccountsWithUsageWindows(t *testing.T) {
 	}
 }
 
+func TestUsageWindowStatsUseChineseLabelsAndBudgetEstimate(t *testing.T) {
+	script, err := webFiles.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(script)
+	for _, text := range []string{
+		"请求 ${formatCompact(windowStats.requests)}",
+		"令牌 ${formatCompact(windowStats.tokens)}",
+		"账号消费 $${formatMoney(windowStats.cost)}",
+		"用户消费 $${formatMoney(windowStats.user_cost)}",
+		"推算总额度 $${formatMoney(budget.total)}",
+		"推算剩余 $${formatMoney(budget.remaining)}",
+		"const total = spent / (utilization / 100)",
+	} {
+		if !strings.Contains(content, text) {
+			t.Fatalf("usage window display rule is missing %q", text)
+		}
+	}
+}
+
 func TestAutoResetEnabledBanner(t *testing.T) {
 	script, err := webFiles.ReadFile("web/app.js")
 	if err != nil {
