@@ -463,9 +463,14 @@ func TestUsageWindowStatsUseChineseLabelsAndBudgetEstimate(t *testing.T) {
 		"暂未获取到重置时间，请等待下次重置",
 		"usage.user_utilization",
 		"const total = spent / (utilization / 100)",
+		"function windowProgressValues(usage)",
 		"usage?.utilization_pending_confirmation === true",
+		"createWindowPercentage('当前用户'",
+		"'账号总用量'",
+		"progress-bar progress-bar-account",
+		"progress-bar progress-bar-user",
+		"账号总用量 ${formatPercent(progress.account)}，当前用户 ${formatPercent(progress.user)}",
 		"OpenAI 暂时返回 0%，正在等待下一轮扫描确认",
-		"valueNode.textContent = displayUtilization.isPending ? '复核中'",
 	} {
 		if !strings.Contains(content, text) {
 			t.Fatalf("usage window display rule is missing %q", text)

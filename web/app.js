@@ -229,25 +229,25 @@
     }
   }
 
-  function windowDisplayUtilization(usage) {
+  function windowProgressValues(usage) {
     if (usage?.utilization_pending_confirmation === true) {
       return {
-        value: null,
-        isUserScoped: false,
+        account: null,
+        user: null,
+        hasUser: false,
         isPending: true
       }
     }
+    const accountUtilization = Math.max(0, Math.min(100, Number(usage?.utilization) || 0))
     const userUtilization = Number(usage?.user_utilization)
-    if (Number.isFinite(userUtilization) && userUtilization >= 0) {
-      return {
-        value: Math.max(0, Math.min(100, userUtilization)),
-        isUserScoped: true,
-        isPending: false
-      }
-    }
+    const hasUser = usage?.user_utilization !== undefined &&
+      usage?.user_utilization !== null &&
+      Number.isFinite(userUtilization) &&
+      userUtilization >= 0
     return {
-      value: Math.max(0, Math.min(100, Number(usage?.utilization) || 0)),
-      isUserScoped: false,
+      account: accountUtilization,
+      user: hasUser ? Math.min(accountUtilization, Math.max(0, Math.min(100, userUtilization))) : null,
+      hasUser,
       isPending: false
     }
   }
@@ -353,6 +353,19 @@
     return alert
   }
 
+  function createWindowPercentage(label, value, className) {
+    const item = document.createElement('span')
+    item.className = `window-percentage ${className}`
+    const labelNode = document.createElement('span')
+    labelNode.className = 'window-percentage-label'
+    labelNode.textContent = label
+    const valueNode = document.createElement('strong')
+    valueNode.className = 'window-percentage-value'
+    valueNode.textContent = value
+    item.append(labelNode, valueNode)
+    return item
+  }
+
   function renderWindow(label, usage) {
     const wrapper = document.createElement('section')
     wrapper.className = 'usage-window'
@@ -374,39 +387,63 @@
       : `重置 ${formatResetTime(usage.resets_at, usage.utilization)}`
     if (usage.reset_time_pending) reset.classList.add('is-pending')
     heading.append(labelNode, reset)
-    const valueNode = document.createElement('span')
-    valueNode.className = 'window-value'
-    const displayUtilization = windowDisplayUtilization(usage)
-    valueNode.textContent = displayUtilization.isPending ? '复核中' : formatPercent(displayUtilization.value)
-    if (displayUtilization.isPending) {
-      valueNode.title = 'OpenAI 暂时返回 0%，等待下一轮扫描确认'
-    } else if (displayUtilization.isUserScoped) {
-      valueNode.title = usage.user_utilization_estimated
-        ? '按账号用量和当前用户消费占比估算'
-        : '当前用户在此用量窗口中的使用率'
+    const progress = windowProgressValues(usage)
+    const userPercentageText = progress.hasUser
+      ? formatPercent(progress.user)
+      : progress.isPending
+        ? '待复核'
+        : usage.reset_time_pending
+          ? '待确认'
+          : usage.user_window_stats_unavailable
+            ? '暂不可用'
+            : '待统计'
+    const percentages = document.createElement('div')
+    percentages.className = 'window-percentages'
+    percentages.append(
+      createWindowPercentage('当前用户', userPercentageText, 'window-percentage-user'),
+      createWindowPercentage(
+        '账号总用量',
+        progress.isPending ? '复核中' : formatPercent(progress.account),
+        'window-percentage-account'
+      )
+    )
+    if (progress.hasUser) {
+      percentages.title = usage.user_utilization_estimated
+        ? '当前用户比例按账号用量和用户消费占比估算'
+        : '当前用户与账号总用量'
     }
-    header.append(heading, valueNode)
+    header.append(heading, percentages)
 
     const track = document.createElement('div')
     track.className = 'progress-track'
     track.setAttribute('role', 'progressbar')
     track.setAttribute('aria-valuemin', '0')
     track.setAttribute('aria-valuemax', '100')
-    const utilization = displayUtilization.value
-    if (displayUtilization.isPending) {
+    if (progress.isPending) {
       track.classList.add('is-pending')
       track.setAttribute('aria-valuetext', 'OpenAI 用量数据复核中')
     } else {
-      track.setAttribute('aria-valuenow', String(utilization))
+      track.setAttribute('aria-valuenow', String(progress.account))
+      track.setAttribute(
+        'aria-valuetext',
+        progress.hasUser
+          ? `账号总用量 ${formatPercent(progress.account)}，当前用户 ${formatPercent(progress.user)}`
+          : `账号总用量 ${formatPercent(progress.account)}，当前用户比例${userPercentageText}`
+      )
     }
-    const bar = document.createElement('div')
-    bar.className = 'progress-bar'
-    bar.style.width = displayUtilization.isPending ? '0%' : `${utilization}%`
-    track.append(bar)
+    const accountBar = document.createElement('div')
+    accountBar.className = 'progress-bar progress-bar-account'
+    accountBar.style.width = progress.isPending ? '0%' : `${progress.account}%`
+    accountBar.title = progress.isPending ? '账号总用量复核中' : `账号总用量 ${formatPercent(progress.account)}`
+    const userBar = document.createElement('div')
+    userBar.className = 'progress-bar progress-bar-user'
+    userBar.style.width = progress.hasUser ? `${progress.user}%` : '0%'
+    userBar.title = progress.hasUser ? `当前用户 ${formatPercent(progress.user)}` : `当前用户比例${userPercentageText}`
+    track.append(accountBar, userBar)
 
     const alerts = document.createElement('div')
     alerts.className = 'window-alerts'
-    if (displayUtilization.isPending) {
+    if (progress.isPending) {
       alerts.append(createWindowAlert('OpenAI 暂时返回 0%，正在等待下一轮扫描确认'))
     }
     if (usage.reset_time_pending) {
@@ -415,7 +452,7 @@
 
     const details = document.createElement('div')
     details.className = 'window-details'
-    const windowStats = displayUtilization.isPending ? null : usage.window_stats
+    const windowStats = progress.isPending ? null : usage.window_stats
     if (windowStats) {
       details.append(createWindowDetailGroup('账号用量', [
         createWindowMetric('请求', formatCompact(windowStats.requests)),
